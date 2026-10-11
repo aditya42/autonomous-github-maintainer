@@ -1,0 +1,6 @@
+openai>=1.100,<3
+pydantic>=2.7,<3
+PyJWT[crypto]>=2.8,<3
+requests>=2.31,<3
+PyYAML>=6,<7
+pytest>=8,<10

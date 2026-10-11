@@ -1,0 +1,30 @@
+# Replace with repositories you own. Enable one initially.
+max_repositories_per_run: 2
+repositories:
+  - repo: YOUR_GITHUB_USERNAME/YOUR_PYTHON_REPOSITORY
+    enabled: false
+    validation:
+      image: python:3.12-slim
+      timeout_seconds: 900
+      commands:
+        - python -m pip install -r requirements.txt
+        - python -m pytest -q
+
+  - repo: YOUR_GITHUB_USERNAME/YOUR_PLAYWRIGHT_REPOSITORY
+    enabled: false
+    validation:
+      image: mcr.microsoft.com/playwright:v1.58.2-noble
+      timeout_seconds: 1200
+      commands:
+        - npm ci
+        - npm run lint --if-present
+        - npm run typecheck --if-present
+        - npx playwright test --project=chromium
+
+  - repo: YOUR_GITHUB_USERNAME/YOUR_JAVA_REPOSITORY
+    enabled: false
+    validation:
+      image: maven:3.9-eclipse-temurin-21
+      timeout_seconds: 1200
+      commands:
+        - mvn -B verify

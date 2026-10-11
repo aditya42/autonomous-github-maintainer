@@ -1,0 +1,54 @@
+name: Autonomous Repository Maintenance
+on:
+  schedule:
+    - cron: '37 7 * * *'
+      timezone: 'Asia/Kolkata'
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Validate only (no writes)'
+        type: boolean
+        default: true
+      repository:
+        description: 'Optional exact allowlisted owner/repo (leave empty for all)'
+        type: string
+        required: false
+        default: ''
+permissions:
+  contents: read
+concurrency:
+  group: daily-repo-maintenance
+  cancel-in-progress: false
+jobs:
+  maintain:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run unit tests
+        run: python -m pytest -q
+      - name: Run maintainer
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'gpt-4.1-mini' }}
+          GH_APP_ID: ${{ secrets.GH_APP_ID }}
+          GH_APP_INSTALLATION_ID: ${{ secrets.GH_APP_INSTALLATION_ID }}
+          GH_APP_PRIVATE_KEY: ${{ secrets.GH_APP_PRIVATE_KEY }}
+          EVENT_NAME: ${{ github.event_name }}
+          INPUT_DRY_RUN: ${{ inputs.dry_run }}
+          INPUT_REPOSITORY: ${{ inputs.repository }}
+        shell: bash
+        run: |
+          args=()
+          if [[ "$EVENT_NAME" == "workflow_dispatch" && "$INPUT_DRY_RUN" == "true" ]]; then
+            args+=(--dry-run)
+          fi
+          if [[ -n "$INPUT_REPOSITORY" ]]; then
+            args+=(--repo "$INPUT_REPOSITORY")
+          fi
+          python -m agent.main "${args[@]}"
