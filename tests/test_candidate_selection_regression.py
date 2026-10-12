@@ -28,9 +28,9 @@ def test_distinct_capabilities_can_share_same_file(tmp_path):
 def test_rejected_candidate_does_not_reserve_capability(tmp_path):
     ai = Mock()
     ai.plan.side_effect = [
-        make_plan("Test schema rejection", .6),
-        make_plan("Test invalid schema errors", .9),
-        make_plan("Test count boundaries", .8),
+        make_plan("Test schema rejection", .40),
+        make_plan("Test invalid schema errors", .90),
+        make_plan("Test count boundaries", .80),
     ]
     best = select_best_plan(ai, "{}", [], tmp_path)
     assert best.title == "Test invalid schema errors"

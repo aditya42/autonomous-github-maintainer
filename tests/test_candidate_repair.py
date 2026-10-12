@@ -33,9 +33,9 @@ def test_selects_highest_qualifying_candidate(tmp_path):
 def test_all_low_scores_skip(tmp_path):
     ai = Mock()
     ai.plan.side_effect = [
-        plan("one", 0.6, paths=["tests/one.test.js"]),
-        plan("two", 0.7, paths=["tests/two.test.js"]),
-        plan("three", 0.74, paths=["tests/three.test.js"]),
+        plan("one", 0.30, paths=["tests/one.test.js"]),
+        plan("two", 0.40, paths=["tests/two.test.js"]),
+        plan("three", 0.49, paths=["tests/three.test.js"]),
     ]
     assert select_best_plan(ai, "{}", [], tmp_path) is None
 
@@ -44,8 +44,8 @@ def test_high_risk_rejected_even_if_high_score(tmp_path):
     ai = Mock()
     ai.plan.side_effect = [
         plan("a", 0.99, risk="high", paths=["tests/a.test.js"]),
-        plan("b", 0.65, paths=["tests/b.test.js"]),
-        plan("c", 0.64, paths=["tests/c.test.js"]),
+        plan("b", 0.45, paths=["tests/b.test.js"]),
+        plan("c", 0.44, paths=["tests/c.test.js"]),
     ]
     assert select_best_plan(ai, "{}", [], tmp_path) is None
 
