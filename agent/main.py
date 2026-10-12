@@ -132,22 +132,26 @@ def candidate_score(plan):
 
 
 def capability_signature(plan):
-    """Coarse functional fingerprint, intentionally independent of target filenames."""
-    words = (plan.title + " " + plan.rationale).lower()
+    """Identify the *primary* behavior from the task title, not background context.
+
+    The rationale often lists adjacent features of an endpoint; those do not
+    automatically belong to the requested change. Unknown tasks stay generic.
+    """
+    title = plan.title.lower()
     groups = (
         ("pii-safeguards", ("pii", "sensitive data", "redaction")),
         ("llm-integration", ("llm", "enrichment", "model response")),
         ("schema-validation", ("schema", "json schema")),
-        ("count-boundaries", ("count", "min/max", "boundary")),
+        ("count-boundaries", ("count", "minimum", "maximum", "boundary")),
         ("deterministic-seed", ("seed", "deterministic")),
         ("api-errors", ("http error", "status code", "invalid input")),
-        ("ci-reliability", ("workflow", "pipeline", "ci ")),
+        ("ci-reliability", ("workflow", "pipeline", "ci reliability")),
     )
-    matches = [name for name, terms in groups if any(t in words for t in terms)]
-    # Multiple unrelated capabilities in one plan indicate an oversized task.
-    # Two terms can naturally describe one tightly related behavior, but three
-    # or more implies a broad plan not suited to the hard 160-line diff limit.
-    if len(matches) >= 3:
+    matches = [name for name, terms in groups if any(term in title for term in terms)]
+    # Don't over-classify an otherwise specific task because its rationale
+    # mentions multiple adjacent branches. Two or more *title* capabilities
+    # are treated as overbroad for this small-change agent.
+    if len(matches) >= 2:
         return "overbroad", matches
     return (matches[0] if matches else "general-" + plan.category), matches
 
@@ -167,20 +171,23 @@ def restore_initial_files(root, contents):
 
 
 def select_best_plan(ai, context, names, root):
-    """Generate exactly 3 plans, independently check scope, and select best."""
+    """Evaluate three distinct proposals; only qualifying proposals reserve intent."""
     candidates = []
     excluded_titles = []
-    seen_signatures = set()
     seen_capabilities = set()
+    seen_generic_titles = set()
+    seen_generic_paths = set()
+
     for index in range(3):
         plan = ai.plan(context, "\n".join(names), excluded_titles=excluded_titles)
         excluded_titles.append(plan.title)
         score = candidate_score(plan)
+        capability, matches = capability_signature(plan)
         log.info(
             "CANDIDATE %d title=%s action=%s risk=%s "
-            "meaningfulness=%.2f rubric=%.2f",
+            "meaningfulness=%.2f rubric=%.2f capability=%s",
             index + 1, plan.title, plan.action, plan.risk,
-            plan.meaningfulness, score,
+            plan.meaningfulness, score, capability,
         )
         reasons = []
         if plan.action != "IMPLEMENT":
@@ -189,21 +196,16 @@ def select_best_plan(ai, context, names, root):
             reasons.append("risk is not low")
         if plan.meaningfulness < 0.75 or score < 0.75:
             reasons.append("quality score below 0.75")
-        capability, matches = capability_signature(plan)
         if capability == "overbroad":
             reasons.append("overbroad: " + ", ".join(matches))
 
-        # Generic categories do not provide sufficient evidence
-        # to identify duplicate functionality.
-        is_specific_capability = capability not in {
-            "overbroad",
-            "general-" + plan.category,
-        }
-
-        if is_specific_capability and capability in seen_capabilities:
-            reasons.append(
-                "duplicate functional capability: " + capability
-            )
+        specific = capability not in {"overbroad", "general-" + plan.category}
+        normalized_title = " ".join(plan.title.casefold().split())
+        if specific and capability in seen_capabilities:
+            reasons.append("duplicate functional capability: " + capability)
+        elif not specific and (normalized_title in seen_generic_titles
+                               or tuple(sorted(plan.target_files)) in seen_generic_paths):
+            reasons.append("duplicate generic task identity")
 
         paths = plan.target_files
         if not 1 <= len(paths) <= 4 or len(set(paths)) != len(paths):
@@ -218,17 +220,20 @@ def select_best_plan(ai, context, names, root):
                         safe_new_test_path(root, name)
             except ValueError as exc:
                 reasons.append(f"unsafe target path: {exc}")
-        signature = tuple(sorted(paths))
-        if signature in seen_signatures:
-            reasons.append("duplicate target file set")
-        seen_signatures.add(signature)
+
+        # Paths are edit scope, NOT task identity: valid different tests can
+        # target the very same smoke-test module.
         if reasons:
             log.info("CANDIDATE %d REJECTED: %s", index + 1, "; ".join(reasons))
+            continue
+
+        candidates.append((score, plan.meaningfulness, plan))
+        if specific:
+            seen_capabilities.add(capability)
         else:
-            candidates.append((score, plan.meaningfulness, plan))
-            # Only accepted candidates reserve a functional capability.
-            if not reasons and is_specific_capability:
-                seen_capabilities.add(capability)
+            seen_generic_titles.add(normalized_title)
+            seen_generic_paths.add(tuple(sorted(paths)))
+
     if not candidates:
         return None
     score, _, plan = max(candidates, key=lambda x: (x[0], x[1]))
