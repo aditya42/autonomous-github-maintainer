@@ -155,7 +155,11 @@ def run_one(repo_cfg, gh, ai, args):
             "PLAN ACCEPTED %s: %s", name, plan.title
         )
         if not 1 <= len(plan.target_files) <= 4 or len(set(plan.target_files)) != len(plan.target_files):
-            raise ValueError('Plan file count invalid')
+           raise ValueError(
+               f"Plan file count invalid: "
+               f"files={plan.target_files}, "
+               f"count={len(plan.target_files)}"
+           )
         contents = read_files(root, plan.target_files)
         # Baseline validation: never work from a broken project.
         baseline_ok, baseline_log = validate_in_docker(root, repo_cfg)
