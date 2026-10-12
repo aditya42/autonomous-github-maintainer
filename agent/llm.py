@@ -61,10 +61,11 @@ Provide evidence-based 0..1 scores for defect_risk, regression_prevention,
 impact, and maintainability in addition to meaningfulness. All scores must
 reflect observed repository evidence, not a desire to pass a threshold.
 When FOCUS AREA is provided, search ONLY for evidence-backed tasks in that area.
-For an IMPLEMENT proposal, you MUST supply evidence_file, evidence_quote,
-and missing_behavior. evidence_file must be a real path present in the
-EVIDENCE CATALOG; evidence_quote must be an EXACT continuous substring of
-its displayed content (12-120 characters, excluding whitespace-only text).
+For an IMPLEMENT proposal, supply evidence_id, evidence_file and
+missing_behavior. Select evidence_id EXACTLY from the provided EVIDENCE IDS.
+The evidence_file must match that ID's file. Do not invent IDs. The optional
+evidence_quote is deprecated; set it to an empty string. An ID verifies that
+source was inspected, not that a testing gap has been independently proven.
 missing_behavior must name ONE concrete observable untested case or reliability
 failure. Cite the current behavior, not imagined API response values.
 Compare existing tests against implementation before claiming missing coverage.

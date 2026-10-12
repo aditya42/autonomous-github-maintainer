@@ -1,4 +1,5 @@
 import argparse
+import hashlib
 import json
 import logging
 import os
@@ -135,26 +136,28 @@ def candidate_score(plan):
 
 
 def capability_signature(plan):
-    """Identify the *primary* behavior from the task title, not background context.
+    """Group related terminology by primary behavior, not keyword count.
 
-    The rationale often lists adjacent features of an endpoint; those do not
-    automatically belong to the requested change. Unknown tasks stay generic.
+    Explicit lists of independently named QE domains remain too broad for
+    the small-change agent; related phrasing is a single scoped capability.
     """
-    title = plan.title.lower()
-    groups = (
-        ("pii-safeguards", ("pii", "sensitive data", "redaction")),
-        ("llm-integration", ("llm", "enrichment", "model response")),
-        ("schema-validation", ("schema", "json schema")),
-        ("count-boundaries", ("count", "minimum", "maximum", "boundary")),
-        ("deterministic-seed", ("seed", "deterministic")),
-        ("api-errors", ("http error", "status code", "invalid input")),
-        ("ci-reliability", ("workflow", "pipeline", "ci reliability")),
-    )
-    matches = [name for name, terms in groups if any(term in title for term in terms)]
-    # Don't over-classify an otherwise specific task because its rationale
-    # mentions multiple adjacent branches. Two or more *title* capabilities
-    # are treated as overbroad for this small-change agent.
-    if len(matches) >= 2:
+    title = plan.title.casefold()
+    domains = {
+        "pii-safeguards": ("pii", "sensitive data", "redaction"),
+        "llm-integration": ("llm", "enrichment", "model response"),
+        "schema-validation": ("schema", "json schema"),
+        "count-boundaries": ("count", "minimum", "maximum", "boundary"),
+        "deterministic-seed": ("seed", "deterministic"),
+        "api-errors": ("http error", "status code", "invalid input"),
+        "ci-reliability": ("workflow", "pipeline", "ci reliability"),
+    }
+    matches = [key for key, terms in domains.items()
+               if any(term in title for term in terms)]
+    # Clearly enumerated, unrelated test areas require separate proposals.
+    # Do not reject natural phrases such as "schema boundary cases" or
+    # "deterministic generation at boundary lengths".
+    if re.search(r"\b(?:schema|count|seed|pii|llm)\s*(?:,|and|&|/)\s*"
+                 r"(?:schema|count|seed|pii|llm)\b", title):
         return "overbroad", matches
     return (matches[0] if matches else "general-" + plan.category), matches
 
@@ -202,6 +205,31 @@ def build_evidence_catalog(root, names):
     return catalog
 
 
+
+def build_evidence_ids(catalog):
+    """Deterministic IDs for inspected source excerpts; no model-generated quotes."""
+    index = {}
+    for path, excerpt in sorted(catalog.items()):
+        digest = hashlib.sha256((path + "\0" + excerpt).encode("utf-8")).hexdigest()[:16]
+        index["ev-" + digest] = {"file": path, "excerpt": excerpt[:200]}
+    return index
+
+
+def evidence_id_error(plan, catalog, evidence_ids):
+    """Fail closed on unknown IDs or mismatched cited file."""
+    if plan.action != "IMPLEMENT":
+        return None
+    item = evidence_ids.get(plan.evidence_id)
+    if item is None:
+        return "evidence ID is absent or not in inspected catalog"
+    if item["file"] != plan.evidence_file or item["file"] not in catalog:
+        return "evidence ID does not match the cited source file"
+    if not catalog[item["file"]].startswith(item["excerpt"]):
+        return "evidence ID source excerpt mismatch"
+    if len(plan.missing_behavior.strip()) < 20:
+        return "missing-behavior justification is too vague"
+    return None
+
 def evidence_rejection(plan, catalog):
     """Verify evidence provenance, not the LLM's unverified impact claim."""
     if plan.action != "IMPLEMENT":
@@ -235,9 +263,12 @@ def select_best_plan(ai, context, names, root):
     seen_generic_titles = set()
     seen_generic_paths = set()
     try:
-        catalog = json.loads(context).get("evidence_catalog")
+        parsed_context = json.loads(context)
+        catalog = parsed_context.get("evidence_catalog")
+        evidence_ids = parsed_context.get("evidence_ids")
     except (ValueError, TypeError):
         catalog = None
+        evidence_ids = None
 
     for index, focus_area in enumerate(PLANNING_FOCUS_AREAS):
         log.info("PLANNING FOCUS %d: %s", index + 1, focus_area)
@@ -266,7 +297,11 @@ def select_best_plan(ai, context, names, root):
         if capability == "overbroad":
             reasons.append("overbroad: " + ", ".join(matches))
         if catalog is not None:
-            evidence_error = evidence_rejection(plan, catalog)
+            evidence_error = (
+                evidence_id_error(plan, catalog, evidence_ids)
+                if evidence_ids is not None
+                else evidence_rejection(plan, catalog)
+            )
             if evidence_error:
                 reasons.append(evidence_error)
             else:
@@ -407,6 +442,7 @@ def run_one(repo_cfg, gh, ai, args):
                 "issues": str(issues)[:2000],
                 "docs": {k: v[:1800] for k, v in intro.items()},
                 "evidence_catalog": evidence_catalog,
+                "evidence_ids": build_evidence_ids(evidence_catalog),
             },
             ensure_ascii=False,
         )

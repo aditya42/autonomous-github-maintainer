@@ -15,6 +15,7 @@ class Plan(BaseModel):
     regression_prevention: float = Field(default=0, ge=0, le=1)
     impact: float = Field(default=0, ge=0, le=1)
     maintainability: float = Field(default=0, ge=0, le=1)
+    evidence_id: str = ""
     evidence_file: str = ""
     evidence_quote: str = ""
     missing_behavior: str = ""
