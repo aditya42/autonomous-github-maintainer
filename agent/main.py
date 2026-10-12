@@ -272,7 +272,7 @@ def run_one(repo_cfg, gh, ai, args):
         valid, result = validate_in_docker(root, repo_cfg)
         if not valid:
             log.warning(
-                "SKIP %s: post-change validation failed: %s", name, result[-900:]
+                "SKIP %s: post-change validation failed: %s", name, result[-12000:]
             )
             return "skip: tests failed"
         # Validation must not silently rewrite tracked source files.

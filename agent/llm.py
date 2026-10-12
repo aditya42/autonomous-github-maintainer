@@ -86,7 +86,20 @@ instead of duplicating setup code.
 If the task cannot be implemented safely within
 the size constraint, return edits=[].
 
-Never weaken assertions simply to reduce line count. """
+Never weaken assertions simply to reduce line count. 
+
+Before writing API tests, verify the expected behavior against
+the supplied route implementation and existing tests.
+
+Do not invent HTTP status codes, response properties,
+validation messages, or supported parameter values.
+
+Assertions must reflect the actual API contract.
+
+If insufficient source code is available to establish an
+expected result, return edits=[] rather than guessing.
+
+"""
         return self.ask(
             Implementation, sys, f"TASK:\n{plan.model_dump_json()}\nFILES:\n{content}"
         )
