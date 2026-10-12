@@ -131,11 +131,47 @@ def candidate_score(plan):
     )
 
 
+def capability_signature(plan):
+    """Coarse functional fingerprint, intentionally independent of target filenames."""
+    words = (plan.title + " " + plan.rationale).lower()
+    groups = (
+        ("pii-safeguards", ("pii", "sensitive data", "redaction")),
+        ("llm-integration", ("llm", "enrichment", "model response")),
+        ("schema-validation", ("schema", "json schema")),
+        ("count-boundaries", ("count", "min/max", "boundary")),
+        ("deterministic-seed", ("seed", "deterministic")),
+        ("api-errors", ("http error", "status code", "invalid input")),
+        ("ci-reliability", ("workflow", "pipeline", "ci ")),
+    )
+    matches = [name for name, terms in groups if any(t in words for t in terms)]
+    # Multiple unrelated capabilities in one plan indicate an oversized task.
+    # Two terms can naturally describe one tightly related behavior, but three
+    # or more implies a broad plan not suited to the hard 160-line diff limit.
+    if len(matches) >= 3:
+        return "overbroad", matches
+    return (matches[0] if matches else "general-" + plan.category), matches
+
+
+def is_oversized_diff_error(exc):
+    return str(exc).startswith("Diff exceeds 160 lines:")
+
+
+def restore_initial_files(root, contents):
+    """Discard staged generated changes and remove only approved new test files."""
+    git(root, "reset", "--hard", "HEAD")
+    for name, metadata in contents.items():
+        if not metadata["exists"]:
+            path = safe_path(root, name)
+            if path.is_file():
+                path.unlink()
+
+
 def select_best_plan(ai, context, names, root):
     """Generate exactly 3 plans, independently check scope, and select best."""
     candidates = []
     excluded_titles = []
     seen_signatures = set()
+    seen_capabilities = set()
     for index in range(3):
         plan = ai.plan(context, "\n".join(names), excluded_titles=excluded_titles)
         excluded_titles.append(plan.title)
@@ -153,6 +189,22 @@ def select_best_plan(ai, context, names, root):
             reasons.append("risk is not low")
         if plan.meaningfulness < 0.75 or score < 0.75:
             reasons.append("quality score below 0.75")
+        capability, matches = capability_signature(plan)
+        if capability == "overbroad":
+            reasons.append("overbroad: " + ", ".join(matches))
+
+        # Generic categories do not provide sufficient evidence
+        # to identify duplicate functionality.
+        is_specific_capability = capability not in {
+            "overbroad",
+            "general-" + plan.category,
+        }
+
+        if is_specific_capability and capability in seen_capabilities:
+            reasons.append(
+                "duplicate functional capability: " + capability
+            )
+
         paths = plan.target_files
         if not 1 <= len(paths) <= 4 or len(set(paths)) != len(paths):
             reasons.append("invalid target file count or duplicate path")
@@ -174,6 +226,9 @@ def select_best_plan(ai, context, names, root):
             log.info("CANDIDATE %d REJECTED: %s", index + 1, "; ".join(reasons))
         else:
             candidates.append((score, plan.meaningfulness, plan))
+            # Only accepted candidates reserve a functional capability.
+            if not reasons and is_specific_capability:
+                seen_capabilities.add(capability)
     if not candidates:
         return None
     score, _, plan = max(candidates, key=lambda x: (x[0], x[1]))
@@ -321,12 +376,32 @@ def run_one(repo_cfg, gh, ai, args):
         try:
             patch, count = diff_quality(root)
         except ValueError as exc:
-            log.warning(
-                "SKIP %s: generated change rejected by diff policy: %s",
-                name,
-                exc,
-            )
-            return "skip: generated change violates diff policy"
+            if not is_oversized_diff_error(exc):
+                log.warning("SKIP %s: diff policy rejected: %s", name, exc)
+                return "skip: generated change violates diff policy"
+            # Exactly one reduction; no retries if the replacement is still oversized.
+            log.info("SCOPE REDUCTION ATTEMPT 1/1 %s: %s", name, exc)
+            oversized_patch = git(root, "diff", "--cached", "--no-ext-diff", "--unified=3")
+            reduced = ai.reduce_scope(plan, json.dumps(contents, ensure_ascii=False),
+                                      oversized_patch, str(exc))
+            if not reduced.edits:
+                log.warning("SKIP %s: scope reduction declined", name)
+                return "skip: scope reduction declined"
+            if (len(reduced.edits) > 4
+                    or len({edit.path for edit in reduced.edits}) != len(reduced.edits)
+                    or not {edit.path for edit in reduced.edits}.issubset(set(plan.target_files))):
+                log.warning("SKIP %s: scope reduction returned invalid paths", name)
+                return "skip: invalid scope reduction"
+            restore_initial_files(root, contents)
+            try:
+                apply_edits(root, plan, reduced)
+                git(root, "add", "--", *[edit.path for edit in reduced.edits])
+                patch, count = diff_quality(root)
+            except ValueError as reduced_exc:
+                log.warning("SKIP %s: reduced change rejected: %s", name, reduced_exc)
+                return "skip: reduced change violates diff policy"
+            impl = reduced
+            log.info("SCOPE REDUCTION ACCEPTED %s (%s changed lines)", name, count)
         if set(git(root, "diff", "--cached", "--name-only").splitlines()) != {
             e.path for e in impl.edits
         }:
