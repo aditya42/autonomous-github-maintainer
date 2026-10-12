@@ -108,9 +108,52 @@ def run_one(repo_cfg, gh, ai, args):
         context = json.dumps({'repo':name,'description':info.get('description'), 'issues':issues,
                               'docs':intro,'source_samples':samples}, ensure_ascii=False)[:22000]
         plan = ai.plan(context, '\n'.join(names))
-        if plan.action != 'IMPLEMENT' or plan.risk != 'low' or plan.meaningfulness < .75:
-            log.info('SKIP %s: plan rejected %s', name, plan.rationale)
-            return 'skip: no suitable task'
+        
+        # Log the AI planner's complete decision.
+        log.info(
+            "PLAN %s | action=%s | title=%s | "
+            "category=%s | risk=%s | meaningfulness=%.2f | "
+            "target_files=%s",
+            name,
+            plan.action,
+            plan.title,
+            plan.category,
+            plan.risk,
+            plan.meaningfulness,
+            plan.target_files,
+        )
+
+        log.info("PLAN RATIONALE: %s", plan.rationale)
+
+        # Evaluate each rejection rule independently.
+        rejection_reasons = []
+
+        if plan.action != "IMPLEMENT":
+            rejection_reasons.append(
+                f"Action is {plan.action}, expected IMPLEMENT"
+            )
+
+        if plan.risk != "low":
+            rejection_reasons.append(
+                f"Risk is {plan.risk}, only low is allowed"
+            )
+
+        if plan.meaningfulness < 0.75:
+            rejection_reasons.append(
+                f"Meaningfulness {plan.meaningfulness:.2f} "
+                "is below threshold 0.75"
+            )
+
+        if rejection_reasons:
+            for reason in rejection_reasons:
+                log.warning(
+                    "PLAN REJECTED %s: %s", name, reason
+                )
+            return "skip: " + "; ".join(rejection_reasons)
+
+        log.info(
+            "PLAN ACCEPTED %s: %s", name, plan.title
+        )
         if not 1 <= len(plan.target_files) <= 4 or len(set(plan.target_files)) != len(plan.target_files):
             raise ValueError('Plan file count invalid')
         contents = read_files(root, plan.target_files)
