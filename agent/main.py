@@ -440,9 +440,9 @@ def run_one(repo_cfg, gh, ai, args):
         if plan.risk != "low":
             rejection_reasons.append(f"Risk is {plan.risk}, only low is allowed")
 
-        if plan.meaningfulness < 0.75:
+        if plan.meaningfulness < 0.55:
             rejection_reasons.append(
-                f"Meaningfulness {plan.meaningfulness:.2f} is below threshold 0.75"
+                f"Meaningfulness {plan.meaningfulness:.2f} is below threshold 0.55"
             )
 
         if rejection_reasons:
