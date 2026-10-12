@@ -128,10 +128,39 @@ def run_one(repo_cfg, gh, ai, args):
     if gh.open_agent_pr_exists(name):
         log.info("SKIP %s: existing open agent PR", name)
         return "skip: open agent PR"
+
     with tempfile.TemporaryDirectory(prefix="repo-maintainer-") as tmp:
         root = Path(tmp) / "checkout"
         token = gh.token(name)
         clone_repository(name, root, token, base)
+
+        # STEP 1: Validate repository before invoking the AI planner.
+        log.info("BASELINE START %s", name)
+
+        baseline_ok, baseline_log = validate_in_docker(root, repo_cfg)
+
+        if not baseline_ok:
+            log.error(
+                "BASELINE FAILED %s:\n%s",
+                name,
+                baseline_log[-6000:],
+            )
+            return "skip: baseline failing"
+
+        log.info("BASELINE PASSED %s", name)
+
+        # Ensure baseline validation did not modify tracked files.
+        if (
+            git(root, "diff", "--name-only").strip()
+            or git(root, "diff", "--cached", "--name-only").strip()
+        ):
+            log.warning(
+                "SKIP %s: baseline checks modified tracked files",
+                name,
+            )
+            return "skip: baseline modifies tracked files"
+
+        # STEP 2: Start repository analysis and AI task planning.
         names = inventory(root)
         issues = gh.issues(name)
         intro = {}
@@ -221,20 +250,6 @@ def run_one(repo_cfg, gh, ai, args):
                 f"count={len(plan.target_files)}"
             )
         contents = read_files(root, plan.target_files)
-        # Baseline validation: never work from a broken project.
-        baseline_ok, baseline_log = validate_in_docker(root, repo_cfg)
-        if not baseline_ok:
-            log.warning(
-                "SKIP %s: baseline validation failed: %s", name, baseline_log[-4000:]
-            )
-            return "skip: baseline failing"
-        # Reject repositories whose own baseline commands rewrite tracked files.
-        if (
-            git(root, "diff", "--name-only").strip()
-            or git(root, "diff", "--cached", "--name-only").strip()
-        ):
-            log.warning("SKIP %s: baseline checks modified tracked files", name)
-            return "skip: baseline modifies tracked files"
         impl = ai.implement(plan, json.dumps(contents, ensure_ascii=False))
         apply_edits(root, plan, impl)
         # Stage ONLY paths explicitly declared in the approved implementation.
