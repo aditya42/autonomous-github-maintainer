@@ -170,6 +170,49 @@ def restore_initial_files(root, contents):
                 path.unlink()
 
 
+def build_evidence_catalog(root, names):
+    """Bounded source/test excerpts spread across three QE capability areas.
+
+    All content is untrusted. Only allowlisted, readable checkout files enter
+    the catalog; its literal excerpts are later used to verify LLM citations.
+    """
+    extensions = (".py", ".ts", ".tsx", ".js", ".mjs", ".java", ".swift")
+    candidates = [n for n in names if n.endswith(extensions)]
+    groups = (
+        ("route", "api", "server", "handler"),
+        ("generator", "generation", "core", "schema", "seed"),
+        ("pii", "privacy", "guard", "redact", "safety"),
+        ("tests/", "test/", "__tests__", ".test.", ".spec."),
+    )
+    chosen = []
+    for group in groups:
+        matches = [n for n in candidates if any(term in n.lower() for term in group)]
+        chosen.extend(n for n in matches[:3] if n not in chosen)
+    catalog = {}
+    for name in chosen[:12]:
+        try:
+            path = safe_path(root, name, existing=True)
+            if path.stat().st_size <= 20000:
+                catalog[name] = path.read_text(encoding="utf-8")[:1050]
+        except (UnicodeError, ValueError, OSError):
+            continue
+    return catalog
+
+
+def evidence_rejection(plan, catalog):
+    """Verify evidence provenance, not the LLM's unverified impact claim."""
+    if plan.action != "IMPLEMENT":
+        return None
+    if plan.evidence_file not in catalog:
+        return "evidence file is missing from inspected source catalog"
+    quote = plan.evidence_quote.strip()
+    if not 12 <= len(quote) <= 120 or quote not in catalog[plan.evidence_file]:
+        return "evidence quote is not an exact 12-120 character source excerpt"
+    if len(plan.missing_behavior.strip()) < 20:
+        return "missing-behavior justification is too vague"
+    return None
+
+
 PLANNING_FOCUS_AREAS = (
     "API contract, input validation, and narrowly scoped boundary behaviors",
     "Deterministic generation, schema constraints, and data correctness",
@@ -184,6 +227,10 @@ def select_best_plan(ai, context, names, root):
     seen_capabilities = set()
     seen_generic_titles = set()
     seen_generic_paths = set()
+    try:
+        catalog = json.loads(context).get("evidence_catalog")
+    except (ValueError, TypeError):
+        catalog = None
 
     for index, focus_area in enumerate(PLANNING_FOCUS_AREAS):
         log.info("PLANNING FOCUS %d: %s", index + 1, focus_area)
@@ -211,6 +258,14 @@ def select_best_plan(ai, context, names, root):
             reasons.append("quality score below 0.75")
         if capability == "overbroad":
             reasons.append("overbroad: " + ", ".join(matches))
+        if catalog is not None:
+            evidence_error = evidence_rejection(plan, catalog)
+            if evidence_error:
+                reasons.append(evidence_error)
+            else:
+                log.info("CANDIDATE %d EVIDENCE file=%s quote=%r gap=%s",
+                         index + 1, plan.evidence_file,
+                         plan.evidence_quote[:120], plan.missing_behavior[:220])
 
         specific = capability not in {"overbroad", "general-" + plan.category}
         normalized_title = " ".join(plan.title.casefold().split())
@@ -335,16 +390,19 @@ def run_one(repo_cfg, gh, ai, args):
                 )[:1800]
             except (UnicodeDecodeError, ValueError):
                 continue
+        evidence_catalog = build_evidence_catalog(root, names)
+        log.info("EVIDENCE CATALOG %s: %d inspected files: %s",
+                 name, len(evidence_catalog), list(evidence_catalog))
         context = json.dumps(
             {
                 "repo": name,
                 "description": info.get("description"),
-                "issues": issues,
-                "docs": intro,
-                "source_samples": samples,
+                "issues": str(issues)[:2000],
+                "docs": {k: v[:1800] for k, v in intro.items()},
+                "evidence_catalog": evidence_catalog,
             },
             ensure_ascii=False,
-        )[:22000]
+        )
         plan = select_best_plan(ai, context, names, root)
         if plan is None:
             log.info("SKIP %s: no candidate meets quality and safety policy", name)
