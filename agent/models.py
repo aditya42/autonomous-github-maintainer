@@ -10,6 +10,11 @@ class Plan(BaseModel):
     target_files: list[str]
     meaningfulness: float = Field(ge=0, le=1)
     risk: Literal["low", "medium", "high"]
+    # Defaults preserve older tests; the planning prompt requires explicit values.
+    defect_risk: float = Field(default=0, ge=0, le=1)
+    regression_prevention: float = Field(default=0, ge=0, le=1)
+    impact: float = Field(default=0, ge=0, le=1)
+    maintainability: float = Field(default=0, ge=0, le=1)
 
 
 class Edit(BaseModel):

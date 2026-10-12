@@ -120,6 +120,67 @@ def safe_new_test_staged(repo, name):
         raise ValueError(f"New staged file name not an approved test: {name}")
 
 
+def candidate_score(plan):
+    """Consistent ranking rubric; AI ratings are not independently verified."""
+    return round(
+        0.30 * plan.defect_risk
+        + 0.35 * plan.regression_prevention
+        + 0.20 * plan.impact
+        + 0.15 * plan.maintainability,
+        4,
+    )
+
+
+def select_best_plan(ai, context, names, root):
+    """Generate exactly 3 plans, independently check scope, and select best."""
+    candidates = []
+    excluded_titles = []
+    seen_signatures = set()
+    for index in range(3):
+        plan = ai.plan(context, "\n".join(names), excluded_titles=excluded_titles)
+        excluded_titles.append(plan.title)
+        score = candidate_score(plan)
+        log.info(
+            "CANDIDATE %d title=%s action=%s risk=%s "
+            "meaningfulness=%.2f rubric=%.2f",
+            index + 1, plan.title, plan.action, plan.risk,
+            plan.meaningfulness, score,
+        )
+        reasons = []
+        if plan.action != "IMPLEMENT":
+            reasons.append("not an IMPLEMENT task")
+        if plan.risk != "low":
+            reasons.append("risk is not low")
+        if plan.meaningfulness < 0.75 or score < 0.75:
+            reasons.append("quality score below 0.75")
+        paths = plan.target_files
+        if not 1 <= len(paths) <= 4 or len(set(paths)) != len(paths):
+            reasons.append("invalid target file count or duplicate path")
+        else:
+            try:
+                for name in paths:
+                    p = safe_path(root, name)
+                    if p.is_file():
+                        safe_path(root, name, existing=True)
+                    else:
+                        safe_new_test_path(root, name)
+            except ValueError as exc:
+                reasons.append(f"unsafe target path: {exc}")
+        signature = tuple(sorted(paths))
+        if signature in seen_signatures:
+            reasons.append("duplicate target file set")
+        seen_signatures.add(signature)
+        if reasons:
+            log.info("CANDIDATE %d REJECTED: %s", index + 1, "; ".join(reasons))
+        else:
+            candidates.append((score, plan.meaningfulness, plan))
+    if not candidates:
+        return None
+    score, _, plan = max(candidates, key=lambda x: (x[0], x[1]))
+    log.info("SELECTED PLAN title=%s rubric=%.2f", plan.title, score)
+    return plan
+
+
 def run_one(repo_cfg, gh, ai, args):
     name = repo_cfg["repo"]
     log.info("Examining %s", name)
@@ -203,7 +264,10 @@ def run_one(repo_cfg, gh, ai, args):
             },
             ensure_ascii=False,
         )[:22000]
-        plan = ai.plan(context, "\n".join(names))
+        plan = select_best_plan(ai, context, names, root)
+        if plan is None:
+            log.info("SKIP %s: no candidate meets quality and safety policy", name)
+            return "skip: no qualifying candidate"
 
         # Log the AI planner's complete decision.
         log.info(
@@ -271,10 +335,56 @@ def run_one(repo_cfg, gh, ai, args):
             raise ValueError("Unstaged modifications before validation")
         valid, result = validate_in_docker(root, repo_cfg)
         if not valid:
-            log.warning(
-                "SKIP %s: post-change validation failed: %s", name, result[-12000:]
-            )
-            return "skip: tests failed"
+            log.warning("VALIDATION FAILED %s:\n%s", name, result[-12000:])
+            log.info("REPAIR ATTEMPT 1/1 %s", name)
+            # Only one corrective attempt is allowed, followed by full validation.
+            # The original contents and initial patch are evidence, not instructions.
+            try:
+                repaired = ai.repair(
+                    plan, json.dumps(contents, ensure_ascii=False), patch, result,
+                    reference_context=context,
+                )
+                if not repaired.edits:
+                    log.warning("SKIP %s: repair agent declined", name)
+                    return "skip: repair declined"
+                # Revalidate ALL paths and contents before resetting the temporary clone.
+                expected = set(plan.target_files)
+                repaired_paths = [edit.path for edit in repaired.edits]
+                if len(repaired_paths) != len(set(repaired_paths)) or not set(repaired_paths).issubset(expected):
+                    raise ValueError("Repair paths outside approved target files")
+                for edit in repaired.edits:
+                    p = safe_path(root, edit.path)
+                    if contents[edit.path]["exists"]:
+                        safe_path(root, edit.path, existing=True)
+                    else:
+                        # New test path was checked before the first attempt.
+                        safe_new_test_staged(root, edit.path)
+                    if not edit.content.strip() or len(edit.content.encode()) > 20000:
+                        raise ValueError("Repair content invalid")
+                # Reset tracked files and remove ONLY the new files from the approved plan.
+                git(root, "reset", "--hard", "HEAD")
+                for path_name in plan.target_files:
+                    if not contents[path_name]["exists"]:
+                        p = safe_path(root, path_name)
+                        if p.is_file():
+                            p.unlink()
+                apply_edits(root, plan, repaired)
+                git(root, "add", "--", *repaired_paths)
+                patch, count = diff_quality(root)
+                changed = set(git(root, "diff", "--cached", "--name-only").splitlines())
+                if changed != set(repaired_paths):
+                    raise ValueError("Repair changed unexpected files")
+                if git(root, "diff", "--name-only").strip():
+                    raise ValueError("Unstaged modifications after repair")
+            except ValueError as exc:
+                log.warning("SKIP %s: repair violates policy: %s", name, exc)
+                return "skip: repair violates policy"
+            log.info("REPAIR VALIDATION START %s", name)
+            valid, result = validate_in_docker(root, repo_cfg)
+            if not valid:
+                log.warning("SKIP %s: repair validation failed:\n%s", name, result[-12000:])
+                return "skip: repair tests failed"
+            log.info("REPAIR VALIDATION PASSED %s", name)
         # Validation must not silently rewrite tracked source files.
         verified_patch, _ = diff_quality(root)
         if git(root, "diff", "--name-only").strip():
