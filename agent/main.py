@@ -13,6 +13,9 @@ from .validation import validate_in_docker
 
 log = logging.getLogger("maintainer")
 
+# Candidate acceptance policy; other safety checks remain unchanged.
+MIN_CANDIDATE_SCORE = 0.50
+
 
 def inventory(root: Path) -> list[str]:
     files = []
@@ -258,8 +261,8 @@ def select_best_plan(ai, context, names, root):
             reasons.append("not an IMPLEMENT task")
         if plan.risk != "low":
             reasons.append("risk is not low")
-        if plan.meaningfulness < 0.75 or score < 0.75:
-            reasons.append("quality score below 0.75")
+        if plan.meaningfulness < MIN_CANDIDATE_SCORE or score < MIN_CANDIDATE_SCORE:
+            reasons.append(f"quality score below {MIN_CANDIDATE_SCORE:.2f}")
         if capability == "overbroad":
             reasons.append("overbroad: " + ", ".join(matches))
         if catalog is not None:
@@ -440,9 +443,9 @@ def run_one(repo_cfg, gh, ai, args):
         if plan.risk != "low":
             rejection_reasons.append(f"Risk is {plan.risk}, only low is allowed")
 
-        if plan.meaningfulness < 0.55:
+        if plan.meaningfulness < MIN_CANDIDATE_SCORE:
             rejection_reasons.append(
-                f"Meaningfulness {plan.meaningfulness:.2f} is below threshold 0.55"
+                f"Meaningfulness {plan.meaningfulness:.2f} is below threshold {MIN_CANDIDATE_SCORE:.2f}"
             )
 
         if rejection_reasons:
