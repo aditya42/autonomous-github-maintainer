@@ -206,8 +206,12 @@ def evidence_rejection(plan, catalog):
     if plan.evidence_file not in catalog:
         return "evidence file is missing from inspected source catalog"
     quote = plan.evidence_quote.strip()
-    if not 12 <= len(quote) <= 120 or quote not in catalog[plan.evidence_file]:
-        return "evidence quote is not an exact 12-120 character source excerpt"
+    if not quote:
+        return "evidence quote is empty"
+    if len(quote) > 500:
+        return "evidence quote exceeds 500 characters"
+    if quote not in catalog[plan.evidence_file]:
+        return "evidence quote does not exist in cited source"
     if len(plan.missing_behavior.strip()) < 20:
         return "missing-behavior justification is too vague"
     return None
@@ -405,8 +409,11 @@ def run_one(repo_cfg, gh, ai, args):
         )
         plan = select_best_plan(ai, context, names, root)
         if plan is None:
-            log.info("SKIP %s: no candidate meets quality and safety policy", name)
-            return "skip: no qualifying candidate"
+            log.info(
+                "NO_ACTIONABLE_WORK %s: no evidence-backed candidate passed the "
+                "quality, scope, and safety requirements", name,
+            )
+            return "no_actionable_work: no qualifying candidate"
 
         # Log the AI planner's complete decision.
         log.info(
