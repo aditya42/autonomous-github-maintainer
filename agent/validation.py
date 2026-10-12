@@ -13,12 +13,21 @@ def validate_in_docker(repo: Path, cfg: dict) -> tuple[bool, str]:
     # Copy the read-only repository into an isolated,
     # writable workspace inside the container.
     # The original checkout is never modified by validation.
+
     script = "\n".join(
         [
             "set -eu",
             'WORKSPACE="$(mktemp -d /tmp/maintainer.XXXXXX)"',
             'cp -R /source/. "$WORKSPACE/"',
             'cd "$WORKSPACE"',
+            'export HOME="$WORKSPACE"',
+            'export NPM_CONFIG_CACHE="$WORKSPACE/.npm-cache"',
+            "unset NPM_CONFIG_PREFIX",
+            'echo "[validation] user: $(id)"',
+            'echo "[validation] cwd: $(pwd)"',
+            'echo "[validation] npm prefix: $(npm prefix 2>/dev/null || true)"',
+            'echo "[validation] workspace permissions:"',
+            'ls -ld "$WORKSPACE"',
             *commands,
         ]
     )
