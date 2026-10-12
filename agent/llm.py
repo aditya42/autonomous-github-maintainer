@@ -67,7 +67,26 @@ Return complete UTF-8 contents for only plan.target_files. FILES maps paths to
 For exists=false, create a NEW real test file only, with focused assertions.
 Changes must be minimal and useful; never weaken tests or assertions.
 Do not introduce secrets or external side effects. If impossible return edits=[].
-Never fabricate coverage; do not write generated artifacts or paths outside the plan."""
+Never fabricate coverage; do not write generated artifacts or paths outside the plan.  
+
+Keep the complete implementation within 120 changed lines,
+including new files.
+
+Prefer a small, focused set of high-value tests over
+exhaustive scenario coverage.
+
+For API tests, prioritize:
+1. One successful request and response contract check.
+2. One missing or invalid required input.
+3. One boundary condition.
+
+Use existing test utilities and shared fixtures
+instead of duplicating setup code.
+
+If the task cannot be implemented safely within
+the size constraint, return edits=[].
+
+Never weaken assertions simply to reduce line count. """
         return self.ask(
             Implementation, sys, f"TASK:\n{plan.model_dump_json()}\nFILES:\n{content}"
         )

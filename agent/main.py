@@ -254,7 +254,15 @@ def run_one(repo_cfg, gh, ai, args):
         apply_edits(root, plan, impl)
         # Stage ONLY paths explicitly declared in the approved implementation.
         git(root, "add", "--", *[e.path for e in impl.edits])
-        patch, count = diff_quality(root)
+        try:
+            patch, count = diff_quality(root)
+        except ValueError as exc:
+            log.warning(
+                "SKIP %s: generated change rejected by diff policy: %s",
+                name,
+                exc,
+            )
+            return "skip: generated change violates diff policy"
         if set(git(root, "diff", "--cached", "--name-only").splitlines()) != {
             e.path for e in impl.edits
         }:
