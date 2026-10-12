@@ -6,11 +6,23 @@ def validate_in_docker(repo: Path, cfg: dict) -> tuple[bool, str]:
     validation = cfg["validation"]
     commands = validation["commands"]
     image = validation["image"]
-    if not all(isinstance(x, str) and x.strip() for x in commands):
+
+    if not all(isinstance(command, str) and command.strip() for command in commands):
         raise ValueError("Invalid validation commands")
-    # No agent credentials or host secrets passed into container.
-    # Networking allowed for package installation; use pinned dependencies and trusted image.
-    script = "set -eu\n" + "\n".join(commands)
+
+    # Copy the read-only repository into an isolated,
+    # writable workspace inside the container.
+    # The original checkout is never modified by validation.
+    script = "\n".join(
+        [
+            "set -eu",
+            'WORKSPACE="$(mktemp -d /tmp/maintainer.XXXXXX)"',
+            'cp -R /source/. "$WORKSPACE/"',
+            'cd "$WORKSPACE"',
+            *commands,
+        ]
+    )
+
     cmd = [
         "docker",
         "run",
@@ -26,25 +38,39 @@ def validate_in_docker(repo: Path, cfg: dict) -> tuple[bool, str]:
         "no-new-privileges",
         "--cap-drop",
         "ALL",
-        "-v",
-        f"{repo.resolve()}:/workspace",
+        # Execute as an unprivileged user.
+        "--user",
+        "10001:10001",
+        # Give npm and other tools a writable location.
+        "-e",
+        "HOME=/tmp",
+        "-e",
+        "NPM_CONFIG_CACHE=/tmp/.npm",
+        # Mount original source read-only.
+        "--mount",
+        f"type=bind,source={repo.resolve()},target=/source,readonly",
         "-w",
-        "/workspace",
+        "/tmp",
         image,
         "sh",
         "-lc",
         script,
     ]
+
     try:
-        p = subprocess.run(
+        result = subprocess.run(
             cmd,
             capture_output=True,
             text=True,
             timeout=int(validation.get("timeout_seconds", 900)),
         )
-        log = ((p.stdout or "") + "\n" + (p.stderr or ""))[-12000:]
-        return p.returncode == 0, log
+
+        output = ((result.stdout or "") + "\n" + (result.stderr or ""))[-12000:]
+
+        return result.returncode == 0, output
+
     except subprocess.TimeoutExpired:
         return False, "Validation timed out"
+
     except FileNotFoundError:
         return False, "Docker executable not found"

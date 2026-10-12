@@ -225,7 +225,7 @@ def run_one(repo_cfg, gh, ai, args):
         baseline_ok, baseline_log = validate_in_docker(root, repo_cfg)
         if not baseline_ok:
             log.warning(
-                "SKIP %s: baseline validation failed: %s", name, baseline_log[-900:]
+                "SKIP %s: baseline validation failed: %s", name, baseline_log[-4000:]
             )
             return "skip: baseline failing"
         # Reject repositories whose own baseline commands rewrite tracked files.
