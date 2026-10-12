@@ -170,6 +170,13 @@ def restore_initial_files(root, contents):
                 path.unlink()
 
 
+PLANNING_FOCUS_AREAS = (
+    "API contract, input validation, and narrowly scoped boundary behaviors",
+    "Deterministic generation, schema constraints, and data correctness",
+    "PII safeguards, error recovery, and operational reliability",
+)
+
+
 def select_best_plan(ai, context, names, root):
     """Evaluate three distinct proposals; only qualifying proposals reserve intent."""
     candidates = []
@@ -178,8 +185,14 @@ def select_best_plan(ai, context, names, root):
     seen_generic_titles = set()
     seen_generic_paths = set()
 
-    for index in range(3):
-        plan = ai.plan(context, "\n".join(names), excluded_titles=excluded_titles)
+    for index, focus_area in enumerate(PLANNING_FOCUS_AREAS):
+        log.info("PLANNING FOCUS %d: %s", index + 1, focus_area)
+        plan = ai.plan(
+            context,
+            "\n".join(names),
+            excluded_titles=excluded_titles,
+            focus_area=focus_area,
+        )
         excluded_titles.append(plan.title)
         score = candidate_score(plan)
         capability, matches = capability_signature(plan)
@@ -296,18 +309,26 @@ def run_one(repo_cfg, gh, ai, args):
                 intro[doc] = (root / doc).read_text(encoding="utf-8")[:5500]
         # Provide a small representative source sample: planning from filenames alone
         # frequently produces speculative or meaningless tasks.
-        candidates = [
-            n
-            for n in names
-            if n.startswith(("src/", "agent/", "tests/", "lib/")) and n not in intro
+        # Balance source sampling across functional areas. A purely alphabetical
+        # first-ten sample can overrepresent the API layer and hide core logic.
+        source_names = [
+            n for n in names
+            if n.endswith((".py", ".ts", ".tsx", ".js", ".mjs", ".java", ".swift"))
+            and n not in intro
         ]
-        candidates += [
-            n
-            for n in names
-            if n.endswith((".py", ".ts", ".java", ".swift")) and n not in candidates
-        ]
+        sample_groups = (
+            ("generation", "generator", "schema", "core", "seed"),
+            ("pii", "privacy", "safety", "guard", "redact"),
+            ("route", "api", "server", "handler", "validation"),
+            ("tests/", "test/", "__tests__", ".test.", ".spec."),
+        )
+        candidates = []
+        for terms in sample_groups:
+            matched = [n for n in source_names if any(term in n.lower() for term in terms)]
+            candidates.extend(n for n in matched[:4] if n not in candidates)
+        candidates.extend(n for n in source_names if n not in candidates)
         samples = {}
-        for filename in candidates[:10]:
+        for filename in candidates[:16]:
             try:
                 samples[filename] = safe_path(root, filename, existing=True).read_text(
                     encoding="utf-8"
