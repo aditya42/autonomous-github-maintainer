@@ -12,6 +12,7 @@ repositories:
         - npm ci
         - npm test
         - npm run build
+        - npm run test:smoke
 
   - repo: YOUR_GITHUB_USERNAME/YOUR_PLAYWRIGHT_REPOSITORY
     enabled: false
