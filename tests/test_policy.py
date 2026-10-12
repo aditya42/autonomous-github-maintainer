@@ -31,6 +31,7 @@ def test_apply_and_diff(repo):
                 target_files=['module.py'], meaningfulness=.9, risk='low')
     impl = Implementation(explanation='test', edits=[Edit(path='module.py', content='VALUE = 2\n')])
     apply_edits(repo, plan, impl)
+    git(repo, 'add', '--', 'module.py')
     patch, count = diff_quality(repo)
     assert '+VALUE = 2' in patch
     assert count == 2

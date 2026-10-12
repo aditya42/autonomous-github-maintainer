@@ -4,7 +4,7 @@ import yaml
 
 DEFAULT_EXCLUDES = {'.git', 'node_modules', '.venv', 'venv', 'dist', 'build', 'coverage', '__pycache__', '.next', '.pytest_cache'}
 FORBIDDEN = {'.env', '.npmrc', '.pypirc', 'id_rsa', 'id_ed25519', 'credentials.json'}
-ALLOWED_SUFFIXES = {'.py', '.ts', '.tsx', '.js', '.jsx', '.json', '.yaml', '.yml', '.md', '.toml', '.xml', '.java', '.swift', '.sh', '.txt', '.properties'}
+ALLOWED_SUFFIXES = {'.py', '.ts', '.tsx', '.js', '.jsx', '.mjs', '.json', '.yaml', '.yml', '.md', '.toml', '.xml', '.java', '.swift', '.sh', '.txt', '.properties'}
 ALLOWED_NAMES = {'Dockerfile', 'Makefile', '.gitignore'}
 
 def safe_path(root: Path, name: str, existing: bool = False) -> Path:
@@ -27,6 +27,30 @@ def safe_path(root: Path, name: str, existing: bool = False) -> Path:
     if target.is_symlink() or any(p.is_symlink() for p in target.parents if p != root.parent):
         raise ValueError('Symlink paths forbidden')
     return target
+
+def safe_new_test_path(root: Path, name: str) -> Path:
+    """Only allow creating ordinary test source files in test directories.
+
+    safe_path checks traversal, prohibited directories, secret names, and symlinks.
+    This additional policy deliberately excludes new runtime/source/config files.
+    """
+    path = safe_path(root, name, existing=False)
+    rel = path.relative_to(root)
+    if path.exists() or path.is_symlink():
+        raise ValueError(f'New test path already exists: {name}')
+    if not any(part.lower() in {'tests', 'test', '__tests__'} for part in rel.parts[:-1]):
+        raise ValueError(f'New files only allowed under test directories: {name}')
+    filename = rel.name
+    if not (
+        re.fullmatch(r'test_[\w.-]+\.py', filename)
+        or re.fullmatch(r'[\w.-]+(?:\.test|\.spec)\.(?:mjs|js|jsx|ts|tsx)', filename)
+        or re.fullmatch(r'[A-Z][\w]*Test\.java', filename)
+        or re.fullmatch(r'[\w]+_test\.go', filename)
+        or re.fullmatch(r'[\w.-]+Tests?\.swift', filename)
+    ):
+        raise ValueError(f'New file must use a recognized test filename: {name}')
+    return path
+
 
 def load_config(path: str):
     with open(path, encoding='utf-8') as fp:

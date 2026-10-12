@@ -1,8 +1,6 @@
 # Replace with repositories you own. Enable one initially.
 max_repositories_per_run: 1
 repositories:
-
-repositories:
   - repo: aditya42/synthetic-test-data-generator
     enabled: true
     validation:

@@ -8,7 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .github_client import GitHubApp, clone_repository, git
-from .policy import DEFAULT_EXCLUDES, load_config, safe_path
+from .policy import DEFAULT_EXCLUDES, load_config, safe_path, safe_new_test_path
 from .validation import validate_in_docker
 
 log = logging.getLogger('maintainer')
@@ -32,11 +32,16 @@ def inventory(root: Path) -> list[str]:
 def read_files(root, paths, max_bytes=40000):
     result = {}
     for name in paths:
-        path = safe_path(root, name, existing=True)
-        if path.stat().st_size > 18000:
-            raise ValueError(f'Target file too large: {name}')
-        result[name] = path.read_text(encoding='utf-8')
-    if sum(len(v.encode()) for v in result.values()) > max_bytes:
+        path = safe_path(root, name)
+        if path.is_file():
+            safe_path(root, name, existing=True)
+            if path.stat().st_size > 18000:
+                raise ValueError(f'Target file too large: {name}')
+            result[name] = {'exists': True, 'content': path.read_text(encoding='utf-8')}
+        else:
+            safe_new_test_path(root, name)
+            result[name] = {'exists': False, 'content': ''}
+    if sum(len(v['content'].encode()) for v in result.values()) > max_bytes:
         raise ValueError('Selected files exceed context limit')
     return result
 
@@ -46,23 +51,40 @@ def apply_edits(root, plan, impl):
         raise ValueError('No edits or too many edits')
     allowed = set(plan.target_files)
     seen = set()
+    # Validate the complete edit set BEFORE writing any file.
+    prepared = []
     for edit in impl.edits:
         if edit.path not in allowed or edit.path in seen:
             raise ValueError('Edit outside task scope or duplicate')
         seen.add(edit.path)
-        path = safe_path(root, edit.path, existing=True)
-        if len(edit.content.encode()) > 20000:
-            raise ValueError('Edited file too large')
-        path.write_text(edit.content, encoding='utf-8')
+        path = safe_path(root, edit.path)
+        if path.is_file():
+            safe_path(root, edit.path, existing=True)
+        else:
+            safe_new_test_path(root, edit.path)
+        if not edit.content.strip() or len(edit.content.encode()) > 20000:
+            raise ValueError('Edited file empty or too large')
+        prepared.append((path, edit.content))
+    for path, content in prepared:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(content, encoding='utf-8')
 
 
 def diff_quality(repo):
-    changed = git(repo, 'diff', '--name-only').splitlines()
+    # Diff the staged changes, including newly created (formerly untracked) files.
+    changed = git(repo, 'diff', '--cached', '--name-only').splitlines()
     if not changed or len(changed) > 4:
         raise ValueError('Empty diff or excessive file count')
-    for path in changed:
-        safe_path(repo, path, existing=True)
-    numstat = git(repo, 'diff', '--numstat')
+    for name in changed:
+        safe_path(repo, name, existing=True)
+    statuses = git(repo, 'diff', '--cached', '--name-status').splitlines()
+    for entry in statuses:
+        status, _, name = entry.partition('\t')
+        if status not in {'A', 'M'}:
+            raise ValueError(f'Prohibited staged change: {entry}')
+        if status == 'A':
+            safe_new_test_staged(repo, name)
+    numstat = git(repo, 'diff', '--cached', '--numstat')
     changed_lines = 0
     for line in numstat.splitlines():
         a, b, _ = line.split('\t', 2)
@@ -71,10 +93,28 @@ def diff_quality(repo):
         changed_lines += int(a) + int(b)
     if changed_lines > 160:
         raise ValueError(f'Diff exceeds 160 lines: {changed_lines}')
-    patch = git(repo, 'diff', '--no-ext-diff', '--unified=3')
+    patch = git(repo, 'diff', '--cached', '--no-ext-diff', '--unified=3')
     if not patch.strip():
         raise ValueError('No actual change')
     return patch, changed_lines
+
+
+def safe_new_test_staged(repo, name):
+    # Existing file in the working tree, but newly added to git index.
+    # Temporarily validate naming/directory restrictions without requiring absence.
+    path = safe_path(repo, name, existing=True)
+    rel = path.relative_to(repo)
+    if not any(part.lower() in {'tests', 'test', '__tests__'} for part in rel.parts[:-1]):
+        raise ValueError(f'New staged file outside test directories: {name}')
+    import re as _re
+    if not (
+        _re.fullmatch(r'test_[\w.-]+\.py', rel.name)
+        or _re.fullmatch(r'[\w.-]+(?:\.test|\.spec)\.(?:mjs|js|jsx|ts|tsx)', rel.name)
+        or _re.fullmatch(r'[A-Z][\w]*Test\.java', rel.name)
+        or _re.fullmatch(r'[\w]+_test\.go', rel.name)
+        or _re.fullmatch(r'[\w.-]+Tests?\.swift', rel.name)
+    ):
+        raise ValueError(f'New staged file name not an approved test: {name}')
 
 
 def run_one(repo_cfg, gh, ai, args):
@@ -167,20 +207,26 @@ def run_one(repo_cfg, gh, ai, args):
             log.warning('SKIP %s: baseline validation failed: %s', name, baseline_log[-900:])
             return 'skip: baseline failing'
         # Reject repositories whose own baseline commands rewrite tracked files.
-        if git(root, 'diff', '--name-only').strip():
+        if git(root, 'diff', '--name-only').strip() or git(root, 'diff', '--cached', '--name-only').strip():
             log.warning('SKIP %s: baseline checks modified tracked files', name)
             return 'skip: baseline modifies tracked files'
         impl = ai.implement(plan, json.dumps(contents, ensure_ascii=False))
         apply_edits(root, plan, impl)
+        # Stage ONLY paths explicitly declared in the approved implementation.
+        git(root, 'add', '--', *[e.path for e in impl.edits])
         patch, count = diff_quality(root)
-        if set(git(root, 'diff', '--name-only').splitlines()) != {e.path for e in impl.edits}:
+        if set(git(root, 'diff', '--cached', '--name-only').splitlines()) != {e.path for e in impl.edits}:
             raise ValueError('Unexpected changed files')
+        if git(root, 'diff', '--name-only').strip():
+            raise ValueError('Unstaged modifications before validation')
         valid, result = validate_in_docker(root, repo_cfg)
         if not valid:
             log.warning('SKIP %s: post-change validation failed: %s', name, result[-900:])
             return 'skip: tests failed'
         # Validation must not silently rewrite tracked source files.
         verified_patch, _ = diff_quality(root)
+        if git(root, 'diff', '--name-only').strip():
+            raise ValueError('Validation modified staged source files')
         if verified_patch != patch:
             log.warning('SKIP %s: validation modified tracked files', name)
             return 'skip: validation modified sources'
@@ -194,7 +240,6 @@ def run_one(repo_cfg, gh, ai, args):
         slug = re.sub('[^a-z0-9-]+','-',plan.title.lower()).strip('-')[:40] or 'update'
         branch = 'agent/' + datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S') + '-' + slug
         git(root, 'checkout', '-b', branch)
-        git(root, 'add', '--', *[e.path for e in impl.edits])
         git(root, 'commit', '-m', f'agent: {plan.title[:60]}', '-m', f'{plan.rationale[:500]}\n\nValidation: configured checks passed in Docker.')
         git(root, 'push', '-u', 'origin', branch, token=gh.token(name))
         pr = gh.pull_request(name, branch, base, 'agent: '+plan.title[:100],
