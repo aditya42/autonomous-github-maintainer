@@ -33,6 +33,58 @@ def inventory(root: Path) -> list[str]:
     return sorted(files)[:350]
 
 
+def is_test_file(name):
+    """Classify supported test paths, never source modules with test-like substrings."""
+    parts = Path(name).parts
+    leaf = parts[-1] if parts else ""
+    in_tests = any(p.lower() in {"test", "tests", "__tests__"} for p in parts[:-1])
+    test_name = (leaf.startswith("test_") and leaf.endswith(".py")) or (
+        ".test." in leaf or ".spec." in leaf or leaf.endswith("Test.java")
+        or leaf.endswith("_test.go") or leaf.endswith("Tests.swift")
+    )
+    return in_tests and test_name
+
+
+def read_only_contract_context(root, names, plan, max_bytes=22000):
+    """Read independent production contracts without expanding the write allowlist.
+
+    Include the cited production file and nearby source implementations, with
+    scanner/PII, schema and route modules prioritized for relevant test tasks.
+    """
+    eligible = [n for n in names if not is_test_file(n) and
+                n.endswith((".py", ".ts", ".tsx", ".js", ".mjs", ".java", ".swift"))]
+    cited = getattr(plan, "evidence_file", "")
+    title = (plan.title + " " + plan.rationale + " " + cited).lower()
+    terms = (
+        ("pii", "privacy", "secret", "redact", "safeguard") if
+        any(x in title for x in ("pii", "privacy", "secret", "redact")) else
+        ("schema", "generator", "generate", "route", "api")
+    )
+    ranked = sorted(eligible, key=lambda n: (
+        0 if n == cited else 1,
+        0 if any(term in n.lower() for term in terms) else 1,
+        n,
+    ))
+    result = {}
+    total = 0
+    for name in ranked:
+        if len(result) >= 4 or total >= max_bytes:
+            break
+        try:
+            path = safe_path(root, name, existing=True)
+            if path.stat().st_size > 20000:
+                continue
+            content = path.read_text(encoding="utf-8")
+        except (OSError, ValueError, UnicodeError):
+            continue
+        data = content[:min(12000, max_bytes - total)]
+        if not data:
+            continue
+        result[name] = data
+        total += len(data.encode("utf-8"))
+    return result
+
+
 def read_files(root, paths, max_bytes=40000):
     result = {}
     for name in paths:
@@ -318,6 +370,8 @@ def select_best_plan(ai, context, names, root):
             reasons.append("duplicate generic task identity")
 
         paths = plan.target_files
+        if plan.category == "test" and any(not is_test_file(p) for p in paths):
+            reasons.append("test-only proposal includes production edit targets")
         if not 1 <= len(paths) <= 4 or len(set(paths)) != len(paths):
             reasons.append("invalid target file count or duplicate path")
         else:
@@ -498,8 +552,18 @@ def run_one(repo_cfg, gh, ai, args):
                 f"files={plan.target_files}, "
                 f"count={len(plan.target_files)}"
             )
+        # Test-only plans must not edit production code, even if the LLM requests it.
+        if plan.category == "test" and any(not is_test_file(p) for p in plan.target_files):
+            log.warning("SKIP %s: test-only proposal includes production edit targets", name)
+            return "skip: test plan targets production files"
         contents = read_files(root, plan.target_files)
-        impl = ai.implement(plan, json.dumps(contents, ensure_ascii=False))
+        contracts = read_only_contract_context(root, names, plan)
+        log.info("READ-ONLY CONTRACTS %s: %s", name, list(contracts))
+        contract_text = json.dumps(contracts, ensure_ascii=False)
+        impl = ai.implement(
+            plan, json.dumps(contents, ensure_ascii=False),
+            reference_context=contract_text,
+        )
         apply_edits(root, plan, impl)
         # Stage ONLY paths explicitly declared in the approved implementation.
         git(root, "add", "--", *[e.path for e in impl.edits])
@@ -547,7 +611,7 @@ def run_one(repo_cfg, gh, ai, args):
             try:
                 repaired = ai.repair(
                     plan, json.dumps(contents, ensure_ascii=False), patch, result,
-                    reference_context=context,
+                    reference_context=contract_text,
                 )
                 if not repaired.edits:
                     log.warning("SKIP %s: repair agent declined", name)
