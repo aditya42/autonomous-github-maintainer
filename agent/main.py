@@ -176,6 +176,67 @@ def safe_new_test_staged(repo, name):
         raise ValueError(f"New staged file name not an approved test: {name}")
 
 
+def substantive_diff_check(plan, patch, changed_lines):
+    """Reject cosmetic changes and test-only changes without real assertions.
+
+    This is a conservative structural gate, not a proof of regression value.
+    Independent model review and Docker validation remain mandatory.
+    """
+    if not patch.strip() or changed_lines < 4:
+        return "change is too small to demonstrate a meaningful improvement"
+    added = [line[1:].strip() for line in patch.splitlines()
+             if line.startswith("+") and not line.startswith("+++")]
+    removed = [line[1:].strip() for line in patch.splitlines()
+               if line.startswith("-") and not line.startswith("---")]
+    meaningful = lambda s: s and not s.startswith(("#", "//", "/*", "*", "<!--"))
+    added_code = [s for s in added if meaningful(s)]
+    removed_code = [s for s in removed if meaningful(s)]
+    if len(added_code) < 2:
+        return "no substantive executable or assertion changes"
+    if added_code == removed_code:
+        return "reformatted or relocated content only"
+    if plan.category == "test":
+        assertions = ("expect(", "assert ", "assert(", "self.assert", "pytest.raises",
+                      "assertthrows", "assert.rejects", "assert.equal", "assert.strict")
+        if not any(token in s.lower() for s in added_code for token in assertions):
+            return "test-only change does not add a meaningful assertion"
+        if not any(token in s.lower() for s in added_code for token in
+                   ("it(", "test(", "def test_", "@test", "describe(", "assert ", "expect(")):
+            return "test-only change does not exercise an observable behavior"
+    return None
+
+
+def commit_description(plan, changed_lines, review):
+    """Traceable commit body using validated facts, not invented impact claims."""
+    subject = re.sub(r"\s+", " ", plan.title).strip()[:65]
+    category = {"test": "test", "bugfix": "fix", "docs": "docs",
+                "refactor": "refactor", "ci": "ci", "reliability": "fix"}[plan.category]
+    heading = f"{category}: {subject}"[:72]
+    gap = " ".join(plan.missing_behavior.split()) or "See planned improvement"
+    body = (
+        f"Observed gap: {gap[:450]}\n\n"
+        f"Why: {' '.join(plan.rationale.split())[:450]}\n\n"
+        f"Evidence: {plan.evidence_file or 'repository analysis'}\n"
+        f"Change size: {changed_lines} added/deleted lines\n"
+        f"Validation: configured Docker checks passed\n"
+        f"Independent review: approved (score {review.score:.2f})\n"
+        "Human review required; draft PR only."
+    )
+    return heading, body
+
+
+def draft_pr_description(plan, changed_lines, review):
+    return (
+        f"## Quality gap\n{plan.missing_behavior or plan.rationale}\n\n"
+        f"## Implementation rationale\n{plan.rationale}\n\n"
+        f"## Evidence\n{plan.evidence_file or 'Repository analysis'}\n\n"
+        f"## Verification\n- Docker validation: passed\n"
+        f"- Change size: {changed_lines} added/deleted lines\n"
+        f"- Independent reviewer: approved, score {review.score:.2f}\n\n"
+        "**Draft PR only. Requires human review before merging.**"
+    )
+
+
 def candidate_score(plan):
     """Consistent ranking rubric; AI ratings are not independently verified."""
     return round(
@@ -662,10 +723,25 @@ def run_one(repo_cfg, gh, ai, args):
             log.warning("SKIP %s: validation modified tracked files", name)
             return "skip: validation modified sources"
         review = ai.review(plan, patch, result)
+        log.info(
+            "REVIEW DECISION %s: approved=%s meaningful=%s score=%.2f",
+            name, review.approved, review.meaningful, review.score,
+        )
         if not review.approved or not review.meaningful or review.score < 0.8:
             log.info("SKIP %s: rejected by reviewer: %s", name, review.reason)
             return "skip: review declined"
+        substance_issue = substantive_diff_check(plan, patch, count)
+        if substance_issue:
+            log.info("SKIP %s: non-substantive proposal: %s", name, substance_issue)
+            return "skip: non-substantive change"
+        commit_subject, commit_body = commit_description(plan, count, review)
+        pr_body = draft_pr_description(plan, count, review)
+        log.info("COMMIT READY %s: %s (%s changed lines)", name, commit_subject, count)
         if args.dry_run:
+            log.info(
+                "PR_READY_DRY_RUN %s: reviewed and Docker-validated; "
+                "no push/PR because --dry-run is enabled", name,
+            )
             log.info(
                 "DRY RUN %s: %s (%s lines)\n%s", name, plan.title, count, patch[:6000]
             )
@@ -676,22 +752,26 @@ def run_one(repo_cfg, gh, ai, args):
         branch = (
             "agent/" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + slug
         )
+        log.info(
+            "DRAFT_PR_START %s: all validation and review gates passed; "
+            "creating branch for human-reviewed draft PR", name,
+        )
         git(root, "checkout", "-b", branch)
         git(
             root,
             "commit",
             "-m",
-            f"agent: {plan.title[:60]}",
+            commit_subject,
             "-m",
-            f"{plan.rationale[:500]}\n\nValidation: configured checks passed in Docker.",
+            commit_body,
         )
         git(root, "push", "-u", "origin", branch, token=gh.token(name))
         pr = gh.pull_request(
             name,
             branch,
             base,
-            "agent: " + plan.title[:100],
-            f"## Improvement\n{plan.rationale}\n\n## Validation\nAll configured Docker checks passed.\n\n## Review\n{review.reason}\n\n**Draft PR: requires human review.**",
+            commit_subject,
+            pr_body,
         )
         log.info("Created draft PR %s", pr["html_url"])
         return pr["html_url"]
