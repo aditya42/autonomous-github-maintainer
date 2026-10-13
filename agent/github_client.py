@@ -110,6 +110,41 @@ class GitHubApp:
         )
 
 
+    def queue_native_auto_merge(self, name, base, pr):
+        """Queue GitHub-native auto-merge only with required checks and protection."""
+        info = self.repo_info(name)
+        if not info.get("allow_auto_merge"):
+            return False
+        protection = self.request(
+            "GET", f"/repos/{name}/branches/{base}/protection/required_status_checks",
+            repo=name,
+        )
+        if not (protection.get("contexts") or protection.get("checks")):
+            return False
+        if pr.get("state") != "open" or not pr.get("draft") or not pr.get("node_id"):
+            return False
+        if pr.get("base", {}).get("ref") != base:
+            return False
+        if not pr.get("head", {}).get("ref", "").startswith("agent/"):
+            return False
+        ready = self.request(
+            "POST", "/graphql", repo=name,
+            json={"query": "mutation($id:ID!){markPullRequestReadyForReview(input:{pullRequestId:$id}){pullRequest{id isDraft}}}",
+                  "variables": {"id": pr["node_id"]}},
+        )
+        if ready.get("errors") or ready.get("data", {}).get("markPullRequestReadyForReview", {}).get("pullRequest", {}).get("isDraft") is not False:
+            raise RuntimeError("GitHub did not confirm ready-for-review transition")
+        response = self.request(
+            "POST", "/graphql", repo=name,
+            json={"query": "mutation($id:ID!){enablePullRequestAutoMerge(input:{pullRequestId:$id,mergeMethod:SQUASH}){pullRequest{id autoMergeRequest{enabledAt}}}}",
+                  "variables": {"id": pr["node_id"]}},
+        )
+        merged = response.get("data", {}).get("enablePullRequestAutoMerge", {}).get("pullRequest", {})
+        if response.get("errors") or not (merged.get("autoMergeRequest") or {}).get("enabledAt"):
+            raise RuntimeError("GitHub did not confirm auto-merge was scheduled")
+        return True
+
+
 def git(repo_dir, *args, token=None, check=True):
     # The temporary HTTP header is injected into git via environment, not persisted
     # in remotes or disk. Never log its value.

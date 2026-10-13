@@ -42,6 +42,7 @@ jobs:
           EVENT_NAME: ${{ github.event_name }}
           INPUT_DRY_RUN: ${{ inputs.dry_run }}
           INPUT_REPOSITORY: ${{ inputs.repository }}
+          AUTO_MERGE_DRAFT_PRS: "true"
         shell: bash
         run: |
           args=()

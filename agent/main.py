@@ -466,6 +466,47 @@ def select_best_plan(ai, context, names, root):
     return plan
 
 
+
+def push_persistent_maintenance_branch(root, gh, name, base, branch):
+    """Create/reuse one remote branch, refusing to overwrite unmerged work.
+
+    A merged PR may be squash-merged, so ancestry alone is insufficient.
+    Verify the exact remote tip is the head SHA of a merged PR, then use
+    --force-with-lease anchored to that SHA. No unconditional force push.
+    """
+    if branch != "agent/maintenance":
+        raise ValueError("Unexpected agent branch")
+    if gh.open_agent_pr_exists(name):
+        raise ValueError("Another agent PR is open; refusing maintenance branch reuse")
+    ref = f"refs/heads/{branch}"
+    lines = git(root, "ls-remote", "--heads", "origin", ref,
+                token=gh.token(name)).splitlines()
+    if not lines:
+        git(root, "push", "-u", "origin", branch, token=gh.token(name))
+        return "created"
+    if len(lines) != 1:
+        raise ValueError("Ambiguous remote maintenance branch")
+    remote_sha = lines[0].split()[0]
+    if len(remote_sha) != 40 or not all(c in "0123456789abcdef" for c in remote_sha):
+        raise ValueError("Invalid remote branch SHA")
+    owner = name.split("/", 1)[0]
+    prs = gh.request(
+        "GET", f"/repos/{name}/pulls", repo=name,
+        params={"state": "closed", "head": f"{owner}:{branch}", "per_page": 100},
+    )
+    verified = any(
+        p.get("merged_at") and p.get("base", {}).get("ref") == base
+        and p.get("head", {}).get("ref") == branch
+        and p.get("head", {}).get("sha") == remote_sha
+        for p in prs
+    )
+    if not verified:
+        raise ValueError("Persistent branch is not a verified previously merged PR tip")
+    git(root, "push", "-u", f"--force-with-lease={ref}:{remote_sha}",
+        "origin", f"HEAD:{ref}", token=gh.token(name))
+    return "reused"
+
+
 def run_one(repo_cfg, gh, ai, args):
     name = repo_cfg["repo"]
     log.info("Examining %s", name)
@@ -746,12 +787,7 @@ def run_one(repo_cfg, gh, ai, args):
                 "DRY RUN %s: %s (%s lines)\n%s", name, plan.title, count, patch[:6000]
             )
             return "dry-run: validated proposal"
-        slug = (
-            re.sub("[^a-z0-9-]+", "-", plan.title.lower()).strip("-")[:40] or "update"
-        )
-        branch = (
-            "agent/" + datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S") + "-" + slug
-        )
+        branch = "agent/maintenance"
         log.info(
             "DRAFT_PR_START %s: all validation and review gates passed; "
             "creating branch for human-reviewed draft PR", name,
@@ -765,7 +801,12 @@ def run_one(repo_cfg, gh, ai, args):
             "-m",
             commit_body,
         )
-        git(root, "push", "-u", "origin", branch, token=gh.token(name))
+        try:
+            branch_outcome = push_persistent_maintenance_branch(root, gh, name, base, branch)
+            log.info("PERSISTENT_BRANCH %s: %s", name, branch_outcome)
+        except ValueError as exc:
+            log.warning("SKIP %s: persistent branch unsafe: %s", name, exc)
+            return "skip: persistent branch unsafe"
         pr = gh.pull_request(
             name,
             branch,
@@ -774,6 +815,14 @@ def run_one(repo_cfg, gh, ai, args):
             pr_body,
         )
         log.info("Created draft PR %s", pr["html_url"])
+        if os.getenv("AUTO_MERGE_DRAFT_PRS", "").casefold() in {"1", "true", "yes"}:
+            try:
+                if gh.queue_native_auto_merge(name, base, pr):
+                    log.info("AUTO_MERGE_QUEUED %s", pr["html_url"])
+                else:
+                    log.warning("AUTO_MERGE_NOT_ENABLED %s: leaving draft", pr["html_url"])
+            except Exception as exc:
+                log.warning("AUTO_MERGE_NOT_ENABLED %s: %s", pr["html_url"], exc)
         return pr["html_url"]
 
 
