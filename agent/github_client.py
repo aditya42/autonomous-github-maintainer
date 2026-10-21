@@ -183,5 +183,7 @@ def clone_repository(name, target: Path, token: str, branch: str):
         str(target),
         token=token,
     )
-    git(target, "config", "user.name", "repo-maintainer[bot]")
-    git(target, "config", "user.email", "repo-maintainer[bot]@users.noreply.github.com")
+    # Commit as the repository owner; the GitHub App remains the authenticated pusher.
+    # Override these when the account has a numeric GitHub noreply address.
+    git(target, "config", "user.name", os.getenv("MAINTAINER_COMMIT_NAME", "aditya42"))
+    git(target, "config", "user.email", os.getenv("MAINTAINER_COMMIT_EMAIL", "aditya42@users.noreply.github.com"))
