@@ -126,6 +126,17 @@ read-only evidence. Respect explicit PII allowlists, safe synthetic card
 numbers, regex patterns, supported secret formats, and documented exceptions.
 Never assert that a deliberate safe test fixture should be blocked.
 If supplied contracts do not support a claimed detection type, return edits=[].
+CONFIGURATION NEGATIVE TEST CONTRACT (mandatory):
+Before testing a missing or malformed configuration key, inspect the actual
+configuration content and loader implementation supplied in context.
+Use only keys that are demonstrably present and actually required by the
+loader. Never fabricate an 'evaluators', 'provider', or other section.
+Construct the invalid fixture by parsing the original YAML/JSON and removing
+or changing a real key; assert that the fixture differs from the original and
+that the expected rejection is supported by the loader. Removing nonexistent
+keys is a no-op, not a negative test. If key requirements are not established
+in the available source, return edits=[] rather than assume validation.
+
 Before writing API tests, verify the expected behavior against
 the supplied route implementation and existing tests.
 PII ASSERTION CONTRACT (mandatory):
@@ -200,6 +211,14 @@ regex, Luhn rules, safe email domains, reserved IPs, and phone overlaps.
 Do not weaken a requirement to make a failing test pass: if unrelated extra
 findings reveal a genuine security false positive, keep that issue distinct
 and do not rewrite production behavior in a test-only change.
+
+CONFIGURATION REPAIR CONTRACT (mandatory):
+If a negative configuration test failed because the expected error was not
+raised, inspect the original config and its loader contract first. Verify
+the supposedly removed or mutated key really exists and is required.
+Do not repeat removal of an absent YAML section, invent a required field,
+or change production handling to satisfy a fabricated assertion.
+If missing-key rejection cannot be established, return edits=[].
 
 When repairing a failing exact PII count/kinds assertion, identify each
 expected kind from the production scanner. Preserve the positive detection
