@@ -101,6 +101,28 @@ def validate_python_provider_calls(root, paths):
             if isinstance(node, ast.ImportFrom) and node.module:
                 for alias in node.names:
                     imports[alias.asname or alias.name] = (node.module, alias.name)
+        # A module imported as "mock_provider" is not a MockProvider instance.
+        modules = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    modules[alias.asname or alias.name.split(".")[0]] = alias.name
+            elif isinstance(node, ast.ImportFrom) and node.module:
+                for alias in node.names:
+                    if alias.name.endswith("_provider"):
+                        modules[alias.asname or alias.name] = node.module + "." + alias.name
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Attribute):
+                continue
+            base = node.func.value
+            if not isinstance(base, ast.Name) or base.id not in modules:
+                continue
+            module_name = modules[base.id]
+            if module_name.endswith("_provider") and node.func.attr == "generate":
+                raise ValueError(
+                    f"Provider module {module_name} has no module-level generate; "
+                    "instantiate its provider class first"
+                )
         instances = {}
         for node in ast.walk(tree):
             if isinstance(node, (ast.Assign, ast.AnnAssign)):
