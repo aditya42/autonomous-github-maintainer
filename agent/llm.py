@@ -146,6 +146,17 @@ create call and assert it propagates unchanged. Do not claim recovery.
 When a PII-focused plan has no production redaction capability, return
 edits=[] rather than fabricating security behavior.
 
+OPENAI TEST ISOLATION GATE (mandatory):
+Every test constructing OpenAIProvider must patch
+llm_eval_framework.providers.openai_provider.OpenAI BEFORE construction,
+including negative and boundary tests. Prefer @patch and MagicMock.
+The provider itself does not validate None or non-string prompts: do not
+assert TypeError/ValueError for generate(None) or generate(123).
+Its generate method delegates to the mocked SDK; check forwarding or
+mocked exception propagation instead. If an unsupported invalid-input test
+fails, replace the task with one genuine source-backed behavior or return
+edits=[]; NEVER repeat an unisolated constructor in the repair.
+
 MOCK PROVIDER VERIFIED CONTRACT (mandatory):
 In llm_eval_framework.providers.mock_provider, generate is an INSTANCE method
 of MockProvider, never a module-level function. Import MockProvider, construct
@@ -317,6 +328,17 @@ exception exports, or raise a built-in RuntimeError from the mocked
 create call and assert it propagates unchanged. Do not claim recovery.
 When a PII-focused plan has no production redaction capability, return
 edits=[] rather than fabricating security behavior.
+
+OPENAI TEST ISOLATION GATE (mandatory):
+Every test constructing OpenAIProvider must patch
+llm_eval_framework.providers.openai_provider.OpenAI BEFORE construction,
+including negative and boundary tests. Prefer @patch and MagicMock.
+The provider itself does not validate None or non-string prompts: do not
+assert TypeError/ValueError for generate(None) or generate(123).
+Its generate method delegates to the mocked SDK; check forwarding or
+mocked exception propagation instead. If an unsupported invalid-input test
+fails, replace the task with one genuine source-backed behavior or return
+edits=[]; NEVER repeat an unisolated constructor in the repair.
 
 MOCK PROVIDER VERIFIED CONTRACT (mandatory):
 In llm_eval_framework.providers.mock_provider, generate is an INSTANCE method
