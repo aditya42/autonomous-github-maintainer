@@ -123,6 +123,50 @@ def validate_python_provider_calls(root, paths):
                     f"Provider module {module_name} has no module-level generate; "
                     "instantiate its provider class first"
                 )
+        # Fail closed on unisolated OpenAI SDK construction in tests.
+        # Recognize @patch, with patch(...), and patch(...).start() in the
+        # same test function. Module-level construction is never isolated.
+        openai_aliases = {
+            alias for alias, imported in imports.items()
+            if imported == ("llm_eval_framework.providers.openai_provider", "OpenAIProvider")
+        }
+        def patches_openai(node):
+            return any(
+                isinstance(x, ast.Constant)
+                and x.value == "llm_eval_framework.providers.openai_provider.OpenAI"
+                for x in ast.walk(node)
+            )
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call) or not isinstance(node.func, ast.Name):
+                continue
+            if node.func.id not in openai_aliases:
+                continue
+            owners = [
+                fn for fn in ast.walk(tree)
+                if isinstance(fn, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node in list(ast.walk(fn))
+            ]
+            if not owners:
+                raise ValueError("OpenAIProvider instantiated outside isolated test function")
+            function = min(owners, key=lambda fn: fn.end_lineno - fn.lineno)
+            if not (
+                any(patches_openai(dec) for dec in function.decorator_list)
+                or any(isinstance(x, (ast.With, ast.AsyncWith))
+                       and any(patches_openai(item.context_expr) for item in x.items)
+                       and x.lineno <= node.lineno <= x.end_lineno
+                       for x in ast.walk(function))
+                or any(isinstance(x, ast.Call) and patches_openai(x)
+                       and isinstance(x.func, ast.Attribute) and x.func.attr == "start"
+                       and x.lineno < node.lineno for x in ast.walk(function))
+            ):
+                raise ValueError("OpenAIProvider requires patch of its OpenAI SDK before construction")
+        for node in ast.walk(tree):
+            if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            if ("openai_provider" in test_path or "openai" in node.name.lower()):
+                if ("raises_on_none_prompt" in node.name or
+                    "raises_on_non_string_prompt" in node.name):
+                    raise ValueError("OpenAIProvider has no prompt-type rejection contract")
         instances = {}
         for node in ast.walk(tree):
             if isinstance(node, (ast.Assign, ast.AnnAssign)):
