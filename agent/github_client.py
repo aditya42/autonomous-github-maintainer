@@ -115,12 +115,8 @@ class GitHubApp:
         info = self.repo_info(name)
         if not info.get("allow_auto_merge"):
             return False
-        protection = self.request(
-            "GET", f"/repos/{name}/branches/{base}/protection/required_status_checks",
-            repo=name,
-        )
-        if not (protection.get("contexts") or protection.get("checks")):
-            return False
+        # GitHub enforces branch protection/rulesets when enabling and completing auto-merge.
+        # Avoid the protected-branch REST endpoint: GitHub Apps may receive HTTP 403.
         if pr.get("state") != "open" or not pr.get("draft") or not pr.get("node_id"):
             return False
         if pr.get("base", {}).get("ref") != base:
