@@ -727,11 +727,6 @@ def run_one(repo_cfg, gh, ai, args):
             reference_context=contract_text,
         )
         apply_edits(root, plan, impl)
-        try:
-            validate_python_provider_calls(root, [e.path for e in impl.edits])
-        except ValueError as exc:
-            log.warning("SKIP %s: provider contract violation: %s", name, exc)
-            return "skip: unsupported provider API"
         # Stage ONLY paths explicitly declared in the approved implementation.
         git(root, "add", "--", *[e.path for e in impl.edits])
         try:
@@ -769,7 +764,15 @@ def run_one(repo_cfg, gh, ai, args):
             raise ValueError("Unexpected changed files")
         if git(root, "diff", "--name-only").strip():
             raise ValueError("Unstaged modifications before validation")
-        valid, result = validate_in_docker(root, repo_cfg)
+        # Signature violations share the existing single repair attempt.
+        # Run Docker only after static contract checks have passed.
+        try:
+            validate_python_provider_calls(root, [e.path for e in impl.edits])
+        except ValueError as exc:
+            valid, result = False, f"Provider API contract violation: {exc}"
+            log.warning("PROVIDER CONTRACT FAILED %s: %s", name, exc)
+        else:
+            valid, result = validate_in_docker(root, repo_cfg)
         if not valid:
             log.warning("VALIDATION FAILED %s:\n%s", name, result[-12000:])
             log.info("REPAIR ATTEMPT 1/1 %s", name)
