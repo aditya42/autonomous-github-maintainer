@@ -85,6 +85,58 @@ def read_only_contract_context(root, names, plan, max_bytes=22000):
     return result
 
 
+def validate_python_provider_calls(root, paths):
+    """Reject invented methods/keywords on repository Python provider classes."""
+    import ast
+    for test_path in paths:
+        if not is_test_file(test_path) or not test_path.endswith(".py"):
+            continue
+        test_file = safe_path(root, test_path, existing=True)
+        try:
+            tree = ast.parse(test_file.read_text(encoding="utf-8"))
+        except SyntaxError:
+            continue  # Docker/pytest will reject invalid Python.
+        imports = {}
+        for node in ast.walk(tree):
+            if isinstance(node, ast.ImportFrom) and node.module:
+                for alias in node.names:
+                    imports[alias.asname or alias.name] = (node.module, alias.name)
+        instances = {}
+        for node in ast.walk(tree):
+            if isinstance(node, (ast.Assign, ast.AnnAssign)):
+                value = node.value
+                if not isinstance(value, ast.Call) or not isinstance(value.func, ast.Name):
+                    continue
+                cls = imports.get(value.func.id)
+                if not cls or not cls[1].endswith("Provider"):
+                    continue
+                for target in (node.targets if isinstance(node, ast.Assign) else [node.target]):
+                    if isinstance(target, ast.Name):
+                        instances[target.id] = cls
+        for variable, (module, class_name) in instances.items():
+            source_rel = "src/" + module.replace(".", "/") + ".py"
+            if source_rel not in inventory(root):
+                continue
+            production = ast.parse(safe_path(root, source_rel, existing=True).read_text(encoding="utf-8"))
+            cls = next((x for x in production.body if isinstance(x, ast.ClassDef) and x.name == class_name), None)
+            if cls is None:
+                continue
+            methods = {x.name: x for x in cls.body if isinstance(x, (ast.FunctionDef, ast.AsyncFunctionDef))}
+            for call in (x for x in ast.walk(tree) if isinstance(x, ast.Call)):
+                fn = call.func
+                if not (isinstance(fn, ast.Attribute) and isinstance(fn.value, ast.Name)
+                        and fn.value.id == variable):
+                    continue
+                if fn.attr not in methods:
+                    raise ValueError(f"Unsupported production method: {class_name}.{fn.attr}")
+                method = methods[fn.attr]
+                supported = {arg.arg for arg in method.args.args + method.args.kwonlyargs}
+                if method.args.kwarg is None:
+                    invalid = {kw.arg for kw in call.keywords if kw.arg is not None} - supported
+                    if invalid:
+                        raise ValueError(f"Unsupported arguments for {class_name}.{fn.attr}: {sorted(invalid)}")
+
+
 def read_files(root, paths, max_bytes=40000):
     result = {}
     for name in paths:
@@ -675,6 +727,7 @@ def run_one(repo_cfg, gh, ai, args):
             reference_context=contract_text,
         )
         apply_edits(root, plan, impl)
+        validate_python_provider_calls(root, [e.path for e in impl.edits])
         # Stage ONLY paths explicitly declared in the approved implementation.
         git(root, "add", "--", *[e.path for e in impl.edits])
         try:
@@ -748,6 +801,7 @@ def run_one(repo_cfg, gh, ai, args):
                         if p.is_file():
                             p.unlink()
                 apply_edits(root, plan, repaired)
+                validate_python_provider_calls(root, repaired_paths)
                 git(root, "add", "--", *repaired_paths)
                 patch, count = diff_quality(root)
                 changed = set(git(root, "diff", "--cached", "--name-only").splitlines())
