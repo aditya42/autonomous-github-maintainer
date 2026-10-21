@@ -727,7 +727,11 @@ def run_one(repo_cfg, gh, ai, args):
             reference_context=contract_text,
         )
         apply_edits(root, plan, impl)
-        validate_python_provider_calls(root, [e.path for e in impl.edits])
+        try:
+            validate_python_provider_calls(root, [e.path for e in impl.edits])
+        except ValueError as exc:
+            log.warning("SKIP %s: provider contract violation: %s", name, exc)
+            return "skip: unsupported provider API"
         # Stage ONLY paths explicitly declared in the approved implementation.
         git(root, "add", "--", *[e.path for e in impl.edits])
         try:
