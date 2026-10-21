@@ -199,8 +199,10 @@ def substantive_diff_check(plan, patch, changed_lines):
         # Tests must exercise production behavior, not implement a stand-in.
         # Reject newly introduced evaluator/provider/scanner implementations
         # even when those self-contained tests pass.
-        if any(re.match(r"^(?:export\\s+)?class\\s+\\w*(?:Evaluator|Provider|Scanner)\\b", line)
-               for line in added_code):
+        if any(
+            re.match(r"^(?:export\s+)?class\s+\w*(?:Evaluator|Provider|Scanner)\b", line)
+            for line in added_code
+        ):
             return "test implements its own evaluator/provider/scanner instead of exercising production code"
         assertions = ("expect(", "assert ", "assert(", "self.assert", "pytest.raises",
                       "assertthrows", "assert.rejects", "assert.equal", "assert.strict")
