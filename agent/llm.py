@@ -125,6 +125,14 @@ the size constraint, return edits=[].
 
 Never weaken assertions simply to reduce line count. 
 
+PRODUCTION METHOD SIGNATURE CONTRACT (mandatory):
+Before writing provider tests, inspect the exact production class source and its
+method signatures. OpenAIProvider exposes generate(prompt: str), NOT completion().
+Use only source-defined arguments; never invent top_p, temperature or other
+provider method parameters. The SDK client's internal arguments are not
+arguments accepted by the provider. For test-only tasks, return edits=[] if
+the exact production signature cannot be established.
+
 OFFLINE EXTERNAL-SDK TEST CONTRACT (mandatory):
 For provider tests, inspect the production constructor and SDK invocation.
 Patch the SDK client symbol in the MODULE UNDER TEST (where it is imported),
@@ -253,6 +261,14 @@ No real credentials or network traffic. Do not assume constructor parameters
 like api_key that are absent from the real provider signature; likewise do
 not assert input validation, limits or timeout behavior absent from source.
 If a meaningful offline assertion cannot be supported, return edits=[].
+
+PRODUCTION METHOD SIGNATURE CONTRACT (mandatory):
+Before writing provider tests, inspect the exact production class source and its
+method signatures. OpenAIProvider exposes generate(prompt: str), NOT completion().
+Use only source-defined arguments; never invent top_p, temperature or other
+provider method parameters. The SDK client's internal arguments are not
+arguments accepted by the provider. For test-only tasks, return edits=[] if
+the exact production signature cannot be established.
 
 CONFIGURATION REPAIR CONTRACT (mandatory):
 If a negative configuration test failed because the expected error was not
