@@ -2,8 +2,6 @@
 
 A **PR-only, test-gated, AI-assisted** maintenance agent for selected GitHub repositories. It runs daily, picks at most one meaningful low-risk change per repo, verifies the repo was green **before and after** changing it, asks a separate AI reviewer to inspect the diff, and creates a **draft PR**, never an automatic merge.
 
-> No filler commits. No guarantee a code change is perfect. No direct pushes to main. Agent-authored commits are attributed to the GitHub App and reviewable as AI-produced changes.
-
 ## What you need
 
 - Python 3.12+
