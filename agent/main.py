@@ -196,6 +196,13 @@ def substantive_diff_check(plan, patch, changed_lines):
     if added_code == removed_code:
         return "reformatted or relocated content only"
     if plan.category == "test":
+        # Tests must exercise production behavior, not implement a stand-in.
+        # Reject newly introduced evaluator/provider/scanner implementations
+        # even when those self-contained tests pass.
+        if any(re.match(r"^(?:class\\s+\\w*(?:Evaluator|Provider|Scanner)\\b|"
+                        r"(?:export\\s+)?class\\s+\\w*(?:Evaluator|Provider|Scanner)\\b)",
+                        line) for line in added_code):
+            return "test implements its own evaluator/provider/scanner instead of exercising production code"
         assertions = ("expect(", "assert ", "assert(", "self.assert", "pytest.raises",
                       "assertthrows", "assert.rejects", "assert.equal", "assert.strict")
         if not any(token in s.lower() for s in added_code for token in assertions):
