@@ -80,8 +80,5 @@ def test_out_of_scope_rejected(repo):
 def test_config_loads():
     cfg = load_config("config/repositories.yaml")
     enabled = {item["repo"] for item in cfg["repositories"] if item["enabled"]}
-    assert {
-        "aditya42/synthetic-test-data-generator",
-        "aditya42/llm-evaluation-framework",
-    }.issubset(enabled)
+    assert enabled == {"aditya42/llm-evaluation-framework"}
     assert cfg["max_repositories_per_run"] >= len(enabled)
