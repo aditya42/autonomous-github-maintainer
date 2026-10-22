@@ -132,7 +132,7 @@ class GitHubApp:
             raise RuntimeError("GitHub did not confirm ready-for-review transition")
         response = self.request(
             "POST", "/graphql", repo=name,
-            json={"query": "mutation($id:ID!){enablePullRequestAutoMerge(input:{pullRequestId:$id,mergeMethod:SQUASH}){pullRequest{id autoMergeRequest{enabledAt}}}}",
+            json={"query": "mutation($id:ID!){enablePullRequestAutoMerge(input:{pullRequestId:$id,mergeMethod:REBASE}){pullRequest{id autoMergeRequest{enabledAt}}}}",
                   "variables": {"id": pr["node_id"]}},
         )
         merged = response.get("data", {}).get("enablePullRequestAutoMerge", {}).get("pullRequest", {})
@@ -184,6 +184,6 @@ def clone_repository(name, target: Path, token: str, branch: str):
         token=token,
     )
     # Commit as the repository owner; the GitHub App remains the authenticated pusher.
-    # Override these when the account has a numeric GitHub noreply address.
+    # Default email is already associated with the owner on GitHub.\n    # Overrides must use another verified address for the same account.
     git(target, "config", "user.name", os.getenv("MAINTAINER_COMMIT_NAME", "aditya42"))
-    git(target, "config", "user.email", os.getenv("MAINTAINER_COMMIT_EMAIL", "aditya42@users.noreply.github.com"))
+    git(target, "config", "user.email", os.getenv("MAINTAINER_COMMIT_EMAIL", "dhendeaditya510@gmail.com"))
