@@ -1,4 +1,4 @@
-"""Prevent GitHub App squash merging from obscuring the source commit author."""
+"""Ensure auto-merge preserves the original Git commit author and committer."""
 from pathlib import Path
 
 from agent import github_client
@@ -6,7 +6,8 @@ from agent import github_client
 
 def test_auto_merge_preserves_authored_commit():
     source = Path(github_client.__file__).read_text()
-    assert "mergeMethod:REBASE" in source
+    assert "mergeMethod:MERGE" in source
+    assert "mergeMethod:REBASE" not in source
     assert "mergeMethod:SQUASH" not in source
 
 
