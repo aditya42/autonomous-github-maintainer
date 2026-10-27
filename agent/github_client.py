@@ -132,7 +132,7 @@ class GitHubApp:
             raise RuntimeError("GitHub did not confirm ready-for-review transition")
         response = self.request(
             "POST", "/graphql", repo=name,
-            json={"query": "mutation($id:ID!){enablePullRequestAutoMerge(input:{pullRequestId:$id,mergeMethod:REBASE}){pullRequest{id autoMergeRequest{enabledAt}}}}",
+            json={"query": "mutation($id:ID!){enablePullRequestAutoMerge(input:{pullRequestId:$id,mergeMethod:MERGE}){pullRequest{id autoMergeRequest{enabledAt}}}}",
                   "variables": {"id": pr["node_id"]}},
         )
         merged = response.get("data", {}).get("enablePullRequestAutoMerge", {}).get("pullRequest", {})
