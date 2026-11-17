@@ -567,6 +567,10 @@ def select_best_plan(ai, context, names, root):
                     p = safe_path(root, name)
                     if p.is_file():
                         safe_path(root, name, existing=True)
+                        # Match read_files eligibility before ranking a proposal.
+                        # A safe path is not necessarily a readable edit target.
+                        if p.stat().st_size > 18000:
+                            reasons.append(f"target file exceeds 18000 bytes: {name}")
                     else:
                         safe_new_test_path(root, name)
             except ValueError as exc:
