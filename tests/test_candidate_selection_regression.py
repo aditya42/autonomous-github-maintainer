@@ -60,3 +60,55 @@ def test_same_capability_does_not_win_twice(tmp_path):
     ]
     best = select_best_plan(ai, "{}", [], tmp_path)
     assert best.title == "Test invalid schema"
+
+
+def test_oversized_candidate_falls_back_to_eligible_plan(tmp_path):
+    large = tmp_path / "tests" / "test_openai_provider.py"
+    large.parent.mkdir()
+    large.write_text("x" * 18001)
+    small = tmp_path / "tests" / "test_mock_provider.py"
+    small.write_text("def test_existing(): assert True")
+
+    ai = Mock()
+    ai.plan.side_effect = [
+        make_plan("Test PII redaction", .95, "tests/test_openai_provider.py"),
+        make_plan("Test deterministic seed", .85, "tests/test_mock_provider.py"),
+        make_plan("Test schema boundaries", .75, "tests/test_openai_provider.py"),
+    ]
+
+    best = select_best_plan(ai, "{}", [], tmp_path)
+
+    assert best is not None
+    assert best.target_files == ["tests/test_mock_provider.py"]
+    assert ai.plan.call_count == 3
+
+
+def test_all_oversized_candidates_return_no_actionable_work(tmp_path):
+    large = tmp_path / "tests" / "test_openai_provider.py"
+    large.parent.mkdir()
+    large.write_text("x" * 18001)
+
+    ai = Mock()
+    ai.plan.side_effect = [
+        make_plan("Test PII redaction", .95, "tests/test_openai_provider.py"),
+        make_plan("Test deterministic seed", .85, "tests/test_openai_provider.py"),
+        make_plan("Test schema boundaries", .75, "tests/test_openai_provider.py"),
+    ]
+
+    assert select_best_plan(ai, "{}", [], tmp_path) is None
+    assert ai.plan.call_count == 3
+
+
+def test_file_at_size_limit_remains_eligible(tmp_path):
+    target = tmp_path / "tests" / "test_openai_provider.py"
+    target.parent.mkdir()
+    target.write_text("x" * 18000)
+
+    ai = Mock()
+    ai.plan.side_effect = [
+        make_plan("Test PII redaction", .95, "tests/test_openai_provider.py"),
+        make_plan("Test deterministic seed", .85, "tests/test_openai_provider.py"),
+        make_plan("Test schema boundaries", .75, "tests/test_openai_provider.py"),
+    ]
+
+    assert select_best_plan(ai, "{}", [], tmp_path) is not None
