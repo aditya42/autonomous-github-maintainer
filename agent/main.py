@@ -18,6 +18,18 @@ log = logging.getLogger("maintainer")
 MIN_CANDIDATE_SCORE = 0.50
 MAX_EDIT_TARGET_BYTES = 18000
 MAX_IMPLEMENTATION_ATTEMPTS = 3
+MIN_REVIEW_SCORE = 0.80
+
+
+def review_rejection_reason(review):
+    """Apply all independent review gates without treating approval as a score override."""
+    if not review.approved:
+        return "reviewer did not approve"
+    if not review.meaningful:
+        return "reviewer found the change non-meaningful"
+    if review.score < MIN_REVIEW_SCORE:
+        return f"review score {review.score:.2f} below {MIN_REVIEW_SCORE:.2f}"
+    return None
 
 
 def inventory(root: Path) -> list[str]:
@@ -923,8 +935,10 @@ def run_one(repo_cfg, gh, ai, args):
                 "REVIEW DECISION %s: approved=%s meaningful=%s score=%.2f",
                 name, review.approved, review.meaningful, review.score,
             )
-            if not review.approved or not review.meaningful or review.score < 0.8:
-                log.info("SKIP %s: rejected by reviewer: %s", name, review.reason)
+            review_rejection = review_rejection_reason(review)
+            if review_rejection:
+                log.info("REVIEW REJECTED %s: %s; rationale: %s; retrying next candidate",
+                         name, review_rejection, review.reason)
                 continue
             substance_issue = substantive_diff_check(plan, patch, count)
             if substance_issue:
