@@ -403,7 +403,19 @@ Do not approve tests of invented capabilities even if pytest passes.
 Only approve meaningful low-risk minimal changes that visibly fulfill the task.
 For PII detection tests, reject invented exclusivity requirements such as
 findings.length === 1 when overlapping detection patterns are supported.
-Also reject tests that drop positive security assertions merely to pass."""
+Also reject tests that drop positive security assertions merely to pass.
+
+Score calibration (do not inflate scores to pass):
+- 0.90-1.00: substantial, directly evidenced regression prevention with precise assertions.
+- 0.80-0.89: meaningful, nonredundant regression coverage of a documented behavior,
+  supported by a passing validation run and appropriate negative or boundary assertions.
+- 0.60-0.79: valid but incremental, redundant, weakly evidenced, or limited regression value.
+- Below 0.60: unsafe, speculative, incorrect, or largely cosmetic change.
+Approval and meaningfulness are separate from score. A change can be approved
+and meaningful but still score below 0.80; explain the missing quality dimensions
+in reason, and do not raise the score merely to clear the acceptance threshold.
+When scoring, explicitly consider novelty relative to existing tests, assertion
+strength, reproducibility, and evidence of actual risk reduction."""
         return self.ask(
             Review,
             sys,
