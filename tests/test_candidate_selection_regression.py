@@ -141,3 +141,20 @@ def test_ranked_candidates_preserve_rejection_of_oversized_file(tmp_path):
     plans = select_best_plan(ai, "{}", [], tmp_path, return_candidates=True)
     assert len(plans) == 1
     assert plans[0].target_files == ["tests/test_mock_provider.py"]
+
+
+def test_approved_meaningful_review_below_threshold_retries():
+    from agent.main import review_rejection_reason
+    review = Mock(approved=True, meaningful=True, score=0.75)
+    assert review_rejection_reason(review) == "review score 0.75 below 0.80"
+
+
+def test_review_at_threshold_is_accepted():
+    from agent.main import review_rejection_reason
+    assert review_rejection_reason(Mock(approved=True, meaningful=True, score=0.80)) is None
+
+
+def test_review_flags_remain_independent_of_score():
+    from agent.main import review_rejection_reason
+    assert review_rejection_reason(Mock(approved=False, meaningful=True, score=0.99)) == "reviewer did not approve"
+    assert review_rejection_reason(Mock(approved=True, meaningful=False, score=0.99)) == "reviewer found the change non-meaningful"
