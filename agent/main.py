@@ -16,6 +16,8 @@ log = logging.getLogger("maintainer")
 
 # Candidate acceptance policy; other safety checks remain unchanged.
 MIN_CANDIDATE_SCORE = 0.50
+MAX_EDIT_TARGET_BYTES = 18000
+MAX_IMPLEMENTATION_ATTEMPTS = 3
 
 
 def inventory(root: Path) -> list[str]:
@@ -209,7 +211,7 @@ def read_files(root, paths, max_bytes=40000):
         path = safe_path(root, name)
         if path.is_file():
             safe_path(root, name, existing=True)
-            if path.stat().st_size > 18000:
+            if path.stat().st_size > MAX_EDIT_TARGET_BYTES:
                 raise ValueError(f"Target file too large: {name}")
             result[name] = {"exists": True, "content": path.read_text(encoding="utf-8")}
         else:
@@ -437,7 +439,7 @@ def build_evidence_catalog(root, names):
     for name in chosen[:12]:
         try:
             path = safe_path(root, name, existing=True)
-            if path.stat().st_size <= 20000:
+            if path.stat().st_size <= MAX_EDIT_TARGET_BYTES:
                 catalog[name] = path.read_text(encoding="utf-8")[:1050]
         except (UnicodeError, ValueError, OSError):
             continue
@@ -494,7 +496,7 @@ PLANNING_FOCUS_AREAS = (
 )
 
 
-def select_best_plan(ai, context, names, root):
+def select_best_plan(ai, context, names, root, *, return_candidates=False):
     """Evaluate three distinct proposals; only qualifying proposals reserve intent."""
     candidates = []
     excluded_titles = []
@@ -569,8 +571,8 @@ def select_best_plan(ai, context, names, root):
                         safe_path(root, name, existing=True)
                         # Match read_files eligibility before ranking a proposal.
                         # A safe path is not necessarily a readable edit target.
-                        if p.stat().st_size > 18000:
-                            reasons.append(f"target file exceeds 18000 bytes: {name}")
+                        if p.stat().st_size > MAX_EDIT_TARGET_BYTES:
+                            reasons.append(f"target file exceeds {MAX_EDIT_TARGET_BYTES} bytes: {name}")
                     else:
                         safe_new_test_path(root, name)
             except ValueError as exc:
@@ -589,11 +591,12 @@ def select_best_plan(ai, context, names, root):
             seen_generic_titles.add(normalized_title)
             seen_generic_paths.add(tuple(sorted(paths)))
 
-    if not candidates:
-        return None
-    score, _, plan = max(candidates, key=lambda x: (x[0], x[1]))
+    ranked = sorted(candidates, key=lambda x: (x[0], x[1]), reverse=True)
+    if not ranked:
+        return [] if return_candidates else None
+    score, _, plan = ranked[0]
     log.info("SELECTED PLAN title=%s rubric=%.2f", plan.title, score)
-    return plan
+    return [item[2] for item in ranked] if return_candidates else plan
 
 
 
@@ -718,7 +721,11 @@ def run_one(repo_cfg, gh, ai, args):
                 )[:1800]
             except (UnicodeDecodeError, ValueError):
                 continue
-        evidence_catalog = build_evidence_catalog(root, names)
+        eligible_names = [n for n in names
+                          if safe_path(root, n, existing=True).stat().st_size <= MAX_EDIT_TARGET_BYTES]
+        log.info("ELIGIBLE TARGETS %s: %d eligible, %d oversized excluded",
+                 name, len(eligible_names), len(names) - len(eligible_names))
+        evidence_catalog = build_evidence_catalog(root, eligible_names)
         log.info("EVIDENCE CATALOG %s: %d inspected files: %s",
                  name, len(evidence_catalog), list(evidence_catalog))
         context = json.dumps(
@@ -732,237 +739,249 @@ def run_one(repo_cfg, gh, ai, args):
             },
             ensure_ascii=False,
         )
-        plan = select_best_plan(ai, context, names, root)
-        if plan is None:
+        plans = select_best_plan(ai, context, eligible_names, root, return_candidates=True)
+        if not plans:
             log.info(
                 "NO_ACTIONABLE_WORK %s: no evidence-backed candidate passed the "
                 "quality, scope, and safety requirements", name,
             )
             return "no_actionable_work: no qualifying candidate"
 
-        # Log the AI planner's complete decision.
-        log.info(
-            "PLAN %s | action=%s | title=%s | "
-            "category=%s | risk=%s | meaningfulness=%.2f | "
-            "target_files=%s",
-            name,
-            plan.action,
-            plan.title,
-            plan.category,
-            plan.risk,
-            plan.meaningfulness,
-            plan.target_files,
-        )
-
-        log.info("PLAN RATIONALE: %s", plan.rationale)
-
-        # Evaluate each rejection rule independently.
-        rejection_reasons = []
-
-        if plan.action != "IMPLEMENT":
-            rejection_reasons.append(f"Action is {plan.action}, expected IMPLEMENT")
-
-        if plan.risk != "low":
-            rejection_reasons.append(f"Risk is {plan.risk}, only low is allowed")
-
-        if plan.meaningfulness < MIN_CANDIDATE_SCORE:
-            rejection_reasons.append(
-                f"Meaningfulness {plan.meaningfulness:.2f} is below threshold {MIN_CANDIDATE_SCORE:.2f}"
+        for attempt, plan in enumerate(plans[:MAX_IMPLEMENTATION_ATTEMPTS], start=1):
+            log.info("IMPLEMENTATION ATTEMPT %d/%d %s: %s",
+                     attempt, min(len(plans), MAX_IMPLEMENTATION_ATTEMPTS), name, plan.title)
+            if attempt > 1:
+                # Temporary checkout only: remove prior generated test files as well as edits.
+                restore_initial_files(root, previous_contents)
+            previous_contents = {}
+            # Log the AI planner's complete decision.
+            log.info(
+                "PLAN %s | action=%s | title=%s | "
+                "category=%s | risk=%s | meaningfulness=%.2f | "
+                "target_files=%s",
+                name,
+                plan.action,
+                plan.title,
+                plan.category,
+                plan.risk,
+                plan.meaningfulness,
+                plan.target_files,
             )
-
-        if rejection_reasons:
-            for reason in rejection_reasons:
-                log.warning("PLAN REJECTED %s: %s", name, reason)
-            return "skip: " + "; ".join(rejection_reasons)
-
-        log.info("PLAN ACCEPTED %s: %s", name, plan.title)
-        if not 1 <= len(plan.target_files) <= 4 or len(set(plan.target_files)) != len(
-            plan.target_files
-        ):
-            raise ValueError(
-                f"Plan file count invalid: "
-                f"files={plan.target_files}, "
-                f"count={len(plan.target_files)}"
-            )
-        # Test-only plans must not edit production code, even if the LLM requests it.
-        if plan.category == "test" and any(not is_test_file(p) for p in plan.target_files):
-            log.warning("SKIP %s: test-only proposal includes production edit targets", name)
-            return "skip: test plan targets production files"
-        contents = read_files(root, plan.target_files)
-        contracts = read_only_contract_context(root, names, plan)
-        log.info("READ-ONLY CONTRACTS %s: %s", name, list(contracts))
-        contract_text = json.dumps(contracts, ensure_ascii=False)
-        impl = ai.implement(
-            plan, json.dumps(contents, ensure_ascii=False),
-            reference_context=contract_text,
-        )
-        apply_edits(root, plan, impl)
-        # Stage ONLY paths explicitly declared in the approved implementation.
-        git(root, "add", "--", *[e.path for e in impl.edits])
-        try:
-            patch, count = diff_quality(root)
-        except ValueError as exc:
-            if not is_oversized_diff_error(exc):
-                log.warning("SKIP %s: diff policy rejected: %s", name, exc)
-                return "skip: generated change violates diff policy"
-            # Exactly one reduction; no retries if the replacement is still oversized.
-            log.info("SCOPE REDUCTION ATTEMPT 1/1 %s: %s", name, exc)
-            oversized_patch = git(root, "diff", "--cached", "--no-ext-diff", "--unified=3")
-            reduced = ai.reduce_scope(plan, json.dumps(contents, ensure_ascii=False),
-                                      oversized_patch, str(exc))
-            if not reduced.edits:
-                log.warning("SKIP %s: scope reduction declined", name)
-                return "skip: scope reduction declined"
-            if (len(reduced.edits) > 4
-                    or len({edit.path for edit in reduced.edits}) != len(reduced.edits)
-                    or not {edit.path for edit in reduced.edits}.issubset(set(plan.target_files))):
-                log.warning("SKIP %s: scope reduction returned invalid paths", name)
-                return "skip: invalid scope reduction"
-            restore_initial_files(root, contents)
-            try:
-                apply_edits(root, plan, reduced)
-                git(root, "add", "--", *[edit.path for edit in reduced.edits])
-                patch, count = diff_quality(root)
-            except ValueError as reduced_exc:
-                log.warning("SKIP %s: reduced change rejected: %s", name, reduced_exc)
-                return "skip: reduced change violates diff policy"
-            impl = reduced
-            log.info("SCOPE REDUCTION ACCEPTED %s (%s changed lines)", name, count)
-        if set(git(root, "diff", "--cached", "--name-only").splitlines()) != {
-            e.path for e in impl.edits
-        }:
-            raise ValueError("Unexpected changed files")
-        if git(root, "diff", "--name-only").strip():
-            raise ValueError("Unstaged modifications before validation")
-        # Signature violations share the existing single repair attempt.
-        # Run Docker only after static contract checks have passed.
-        try:
-            validate_python_provider_calls(root, [e.path for e in impl.edits])
-        except ValueError as exc:
-            valid, result = False, f"Provider API contract violation: {exc}"
-            log.warning("PROVIDER CONTRACT FAILED %s: %s", name, exc)
-        else:
-            valid, result = validate_in_docker(root, repo_cfg)
-        if not valid:
-            log.warning("VALIDATION FAILED %s:\n%s", name, result[-12000:])
-            log.info("REPAIR ATTEMPT 1/1 %s", name)
-            # Only one corrective attempt is allowed, followed by full validation.
-            # The original contents and initial patch are evidence, not instructions.
-            try:
-                repaired = ai.repair(
-                    plan, json.dumps(contents, ensure_ascii=False), patch, result,
-                    reference_context=contract_text,
+    
+            log.info("PLAN RATIONALE: %s", plan.rationale)
+    
+            # Evaluate each rejection rule independently.
+            rejection_reasons = []
+    
+            if plan.action != "IMPLEMENT":
+                rejection_reasons.append(f"Action is {plan.action}, expected IMPLEMENT")
+    
+            if plan.risk != "low":
+                rejection_reasons.append(f"Risk is {plan.risk}, only low is allowed")
+    
+            if plan.meaningfulness < MIN_CANDIDATE_SCORE:
+                rejection_reasons.append(
+                    f"Meaningfulness {plan.meaningfulness:.2f} is below threshold {MIN_CANDIDATE_SCORE:.2f}"
                 )
-                if not repaired.edits:
-                    log.warning("SKIP %s: repair agent declined", name)
-                    return "skip: repair declined"
-                # Revalidate ALL paths and contents before resetting the temporary clone.
-                expected = set(plan.target_files)
-                repaired_paths = [edit.path for edit in repaired.edits]
-                if len(repaired_paths) != len(set(repaired_paths)) or not set(repaired_paths).issubset(expected):
-                    raise ValueError("Repair paths outside approved target files")
-                for edit in repaired.edits:
-                    p = safe_path(root, edit.path)
-                    if contents[edit.path]["exists"]:
-                        safe_path(root, edit.path, existing=True)
-                    else:
-                        # New test path was checked before the first attempt.
-                        safe_new_test_staged(root, edit.path)
-                    if not edit.content.strip() or len(edit.content.encode()) > 20000:
-                        raise ValueError("Repair content invalid")
-                # Reset tracked files and remove ONLY the new files from the approved plan.
-                git(root, "reset", "--hard", "HEAD")
-                for path_name in plan.target_files:
-                    if not contents[path_name]["exists"]:
-                        p = safe_path(root, path_name)
-                        if p.is_file():
-                            p.unlink()
-                apply_edits(root, plan, repaired)
-                validate_python_provider_calls(root, repaired_paths)
-                git(root, "add", "--", *repaired_paths)
-                patch, count = diff_quality(root)
-                changed = set(git(root, "diff", "--cached", "--name-only").splitlines())
-                if changed != set(repaired_paths):
-                    raise ValueError("Repair changed unexpected files")
-                if git(root, "diff", "--name-only").strip():
-                    raise ValueError("Unstaged modifications after repair")
-            except ValueError as exc:
-                log.warning("SKIP %s: repair violates policy: %s", name, exc)
-                return "skip: repair violates policy"
-            log.info("REPAIR VALIDATION START %s", name)
-            valid, result = validate_in_docker(root, repo_cfg)
-            if not valid:
-                log.warning("SKIP %s: repair validation failed:\n%s", name, result[-12000:])
-                return "skip: repair tests failed"
-            log.info("REPAIR VALIDATION PASSED %s", name)
-        # Validation must not silently rewrite tracked source files.
-        verified_patch, _ = diff_quality(root)
-        if git(root, "diff", "--name-only").strip():
-            raise ValueError("Validation modified staged source files")
-        if verified_patch != patch:
-            log.warning("SKIP %s: validation modified tracked files", name)
-            return "skip: validation modified sources"
-        review = ai.review(plan, patch, result)
-        log.info(
-            "REVIEW DECISION %s: approved=%s meaningful=%s score=%.2f",
-            name, review.approved, review.meaningful, review.score,
-        )
-        if not review.approved or not review.meaningful or review.score < 0.8:
-            log.info("SKIP %s: rejected by reviewer: %s", name, review.reason)
-            return "skip: review declined"
-        substance_issue = substantive_diff_check(plan, patch, count)
-        if substance_issue:
-            log.info("SKIP %s: non-substantive proposal: %s", name, substance_issue)
-            return "skip: non-substantive change"
-        commit_subject, commit_body = commit_description(plan, count, review)
-        pr_body = draft_pr_description(plan, count, review)
-        log.info("COMMIT READY %s: %s (%s changed lines)", name, commit_subject, count)
-        if args.dry_run:
-            log.info(
-                "PR_READY_DRY_RUN %s: reviewed and Docker-validated; "
-                "no push/PR because --dry-run is enabled", name,
+    
+            if rejection_reasons:
+                for reason in rejection_reasons:
+                    log.warning("PLAN REJECTED %s: %s", name, reason)
+                return "skip: " + "; ".join(rejection_reasons)
+    
+            log.info("PLAN ACCEPTED %s: %s", name, plan.title)
+            if not 1 <= len(plan.target_files) <= 4 or len(set(plan.target_files)) != len(
+                plan.target_files
+            ):
+                raise ValueError(
+                    f"Plan file count invalid: "
+                    f"files={plan.target_files}, "
+                    f"count={len(plan.target_files)}"
+                )
+            # Test-only plans must not edit production code, even if the LLM requests it.
+            if plan.category == "test" and any(not is_test_file(p) for p in plan.target_files):
+                log.warning("SKIP %s: test-only proposal includes production edit targets", name)
+                return "skip: test plan targets production files"
+            contents = read_files(root, plan.target_files)
+            previous_contents = contents
+            contracts = read_only_contract_context(root, names, plan)
+            log.info("READ-ONLY CONTRACTS %s: %s", name, list(contracts))
+            contract_text = json.dumps(contracts, ensure_ascii=False)
+            impl = ai.implement(
+                plan, json.dumps(contents, ensure_ascii=False),
+                reference_context=contract_text,
             )
-            log.info(
-                "DRY RUN %s: %s (%s lines)\n%s", name, plan.title, count, patch[:6000]
-            )
-            return "dry-run: validated proposal"
-        branch = "agent/maintenance"
-        log.info(
-            "DRAFT_PR_START %s: all validation and review gates passed; "
-            "creating branch for human-reviewed draft PR", name,
-        )
-        git(root, "checkout", "-b", branch)
-        git(
-            root,
-            "commit",
-            "-m",
-            commit_subject,
-            "-m",
-            commit_body,
-        )
-        try:
-            branch_outcome = push_persistent_maintenance_branch(root, gh, name, base, branch)
-            log.info("PERSISTENT_BRANCH %s: %s", name, branch_outcome)
-        except ValueError as exc:
-            log.warning("SKIP %s: persistent branch unsafe: %s", name, exc)
-            return "skip: persistent branch unsafe"
-        pr = gh.pull_request(
-            name,
-            branch,
-            base,
-            commit_subject,
-            pr_body,
-        )
-        log.info("Created draft PR %s", pr["html_url"])
-        if os.getenv("AUTO_MERGE_DRAFT_PRS", "").casefold() in {"1", "true", "yes"}:
+            apply_edits(root, plan, impl)
+            # Stage ONLY paths explicitly declared in the approved implementation.
+            git(root, "add", "--", *[e.path for e in impl.edits])
             try:
-                if gh.queue_native_auto_merge(name, base, pr):
-                    log.info("AUTO_MERGE_QUEUED %s", pr["html_url"])
-                else:
-                    log.warning("AUTO_MERGE_NOT_ENABLED %s: leaving draft", pr["html_url"])
-            except Exception as exc:
-                log.warning("AUTO_MERGE_NOT_ENABLED %s: %s", pr["html_url"], exc)
-        return pr["html_url"]
+                patch, count = diff_quality(root)
+            except ValueError as exc:
+                if not is_oversized_diff_error(exc):
+                    log.warning("SKIP %s: diff policy rejected: %s; changed=%s; expected=%s",
+                                name, exc, git(root, "diff", "--cached", "--name-only").splitlines(), plan.target_files)
+                    continue
+                # Exactly one reduction; no retries if the replacement is still oversized.
+                log.info("SCOPE REDUCTION ATTEMPT 1/1 %s: %s", name, exc)
+                oversized_patch = git(root, "diff", "--cached", "--no-ext-diff", "--unified=3")
+                reduced = ai.reduce_scope(plan, json.dumps(contents, ensure_ascii=False),
+                                          oversized_patch, str(exc))
+                if not reduced.edits:
+                    log.warning("SKIP %s: scope reduction declined", name)
+                    continue
+                if (len(reduced.edits) > 4
+                        or len({edit.path for edit in reduced.edits}) != len(reduced.edits)
+                        or not {edit.path for edit in reduced.edits}.issubset(set(plan.target_files))):
+                    log.warning("SKIP %s: scope reduction returned invalid paths", name)
+                    continue
+                restore_initial_files(root, contents)
+                try:
+                    apply_edits(root, plan, reduced)
+                    git(root, "add", "--", *[edit.path for edit in reduced.edits])
+                    patch, count = diff_quality(root)
+                except ValueError as reduced_exc:
+                    log.warning("SKIP %s: reduced change rejected: %s", name, reduced_exc)
+                    continue
+                impl = reduced
+                log.info("SCOPE REDUCTION ACCEPTED %s (%s changed lines)", name, count)
+            if set(git(root, "diff", "--cached", "--name-only").splitlines()) != {
+                e.path for e in impl.edits
+            }:
+                raise ValueError("Unexpected changed files")
+            if git(root, "diff", "--name-only").strip():
+                raise ValueError("Unstaged modifications before validation")
+            # Signature violations share the existing single repair attempt.
+            # Run Docker only after static contract checks have passed.
+            try:
+                validate_python_provider_calls(root, [e.path for e in impl.edits])
+            except ValueError as exc:
+                valid, result = False, f"Provider API contract violation: {exc}"
+                log.warning("PROVIDER CONTRACT FAILED %s: %s", name, exc)
+            else:
+                valid, result = validate_in_docker(root, repo_cfg)
+            if not valid:
+                log.warning("VALIDATION FAILED %s:\n%s", name, result[-12000:])
+                log.info("REPAIR ATTEMPT 1/1 %s", name)
+                # Only one corrective attempt is allowed, followed by full validation.
+                # The original contents and initial patch are evidence, not instructions.
+                try:
+                    repaired = ai.repair(
+                        plan, json.dumps(contents, ensure_ascii=False), patch, result,
+                        reference_context=contract_text,
+                    )
+                    if not repaired.edits:
+                        log.warning("SKIP %s: repair agent declined", name)
+                        continue
+                    # Revalidate ALL paths and contents before resetting the temporary clone.
+                    expected = set(plan.target_files)
+                    repaired_paths = [edit.path for edit in repaired.edits]
+                    if len(repaired_paths) != len(set(repaired_paths)) or not set(repaired_paths).issubset(expected):
+                        raise ValueError("Repair paths outside approved target files")
+                    for edit in repaired.edits:
+                        p = safe_path(root, edit.path)
+                        if contents[edit.path]["exists"]:
+                            safe_path(root, edit.path, existing=True)
+                        else:
+                            # New test path was checked before the first attempt.
+                            safe_new_test_staged(root, edit.path)
+                        if not edit.content.strip() or len(edit.content.encode()) > 20000:
+                            raise ValueError("Repair content invalid")
+                    # Reset tracked files and remove ONLY the new files from the approved plan.
+                    git(root, "reset", "--hard", "HEAD")
+                    for path_name in plan.target_files:
+                        if not contents[path_name]["exists"]:
+                            p = safe_path(root, path_name)
+                            if p.is_file():
+                                p.unlink()
+                    apply_edits(root, plan, repaired)
+                    validate_python_provider_calls(root, repaired_paths)
+                    git(root, "add", "--", *repaired_paths)
+                    patch, count = diff_quality(root)
+                    changed = set(git(root, "diff", "--cached", "--name-only").splitlines())
+                    if changed != set(repaired_paths):
+                        raise ValueError("Repair changed unexpected files")
+                    if git(root, "diff", "--name-only").strip():
+                        raise ValueError("Unstaged modifications after repair")
+                except ValueError as exc:
+                    log.warning("SKIP %s: repair violates policy: %s", name, exc)
+                    continue
+                log.info("REPAIR VALIDATION START %s", name)
+                valid, result = validate_in_docker(root, repo_cfg)
+                if not valid:
+                    log.warning("SKIP %s: repair validation failed:\n%s", name, result[-12000:])
+                    continue
+                log.info("REPAIR VALIDATION PASSED %s", name)
+            # Validation must not silently rewrite tracked source files.
+            verified_patch, _ = diff_quality(root)
+            if git(root, "diff", "--name-only").strip():
+                raise ValueError("Validation modified staged source files")
+            if verified_patch != patch:
+                log.warning("SKIP %s: validation modified tracked files", name)
+                continue
+            review = ai.review(plan, patch, result)
+            log.info(
+                "REVIEW DECISION %s: approved=%s meaningful=%s score=%.2f",
+                name, review.approved, review.meaningful, review.score,
+            )
+            if not review.approved or not review.meaningful or review.score < 0.8:
+                log.info("SKIP %s: rejected by reviewer: %s", name, review.reason)
+                continue
+            substance_issue = substantive_diff_check(plan, patch, count)
+            if substance_issue:
+                log.info("SKIP %s: non-substantive proposal: %s", name, substance_issue)
+                continue
+            commit_subject, commit_body = commit_description(plan, count, review)
+            pr_body = draft_pr_description(plan, count, review)
+            log.info("COMMIT READY %s: %s (%s changed lines)", name, commit_subject, count)
+            if args.dry_run:
+                log.info(
+                    "PR_READY_DRY_RUN %s: reviewed and Docker-validated; "
+                    "no push/PR because --dry-run is enabled", name,
+                )
+                log.info(
+                    "DRY RUN %s: %s (%s lines)\n%s", name, plan.title, count, patch[:6000]
+                )
+                return "dry-run: validated proposal"
+            branch = "agent/maintenance"
+            log.info(
+                "DRAFT_PR_START %s: all validation and review gates passed; "
+                "creating branch for human-reviewed draft PR", name,
+            )
+            git(root, "checkout", "-b", branch)
+            git(
+                root,
+                "commit",
+                "-m",
+                commit_subject,
+                "-m",
+                commit_body,
+            )
+            try:
+                branch_outcome = push_persistent_maintenance_branch(root, gh, name, base, branch)
+                log.info("PERSISTENT_BRANCH %s: %s", name, branch_outcome)
+            except ValueError as exc:
+                log.warning("SKIP %s: persistent branch unsafe: %s", name, exc)
+                return "skip: persistent branch unsafe"
+            pr = gh.pull_request(
+                name,
+                branch,
+                base,
+                commit_subject,
+                pr_body,
+            )
+            log.info("Created draft PR %s", pr["html_url"])
+            if os.getenv("AUTO_MERGE_DRAFT_PRS", "").casefold() in {"1", "true", "yes"}:
+                try:
+                    if gh.queue_native_auto_merge(name, base, pr):
+                        log.info("AUTO_MERGE_QUEUED %s", pr["html_url"])
+                    else:
+                        log.warning("AUTO_MERGE_NOT_ENABLED %s: leaving draft", pr["html_url"])
+                except Exception as exc:
+                    log.warning("AUTO_MERGE_NOT_ENABLED %s: %s", pr["html_url"], exc)
+            return pr["html_url"]
+        log.info("NO_COMMIT %s: %d candidate attempts exhausted", name,
+                 min(len(plans), MAX_IMPLEMENTATION_ATTEMPTS))
+        return "skip: all candidates exhausted"
 
 
 def main():

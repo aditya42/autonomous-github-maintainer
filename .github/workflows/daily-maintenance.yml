@@ -52,4 +52,14 @@ jobs:
           if [[ -n "$INPUT_REPOSITORY" ]]; then
             args+=(--repo "$INPUT_REPOSITORY")
           fi
-          python -m agent.main "${args[@]}"
+          set -o pipefail
+          python -m agent.main "${args[@]}" 2>&1 | tee maintainer-run.log
+          {
+            echo "## Autonomous maintenance result"
+            echo ""
+            echo "### Outcome"
+            grep -E "→ |NO_COMMIT|NO_ACTIONABLE_WORK|Created draft PR|failed:" maintainer-run.log | tail -20 || true
+            echo ""
+            echo "### Candidate and diff diagnostics"
+            grep -E "ELIGIBLE TARGETS|CANDIDATE .* REJECTED|IMPLEMENTATION ATTEMPT|diff policy rejected" maintainer-run.log | tail -30 || true
+          } >> "$GITHUB_STEP_SUMMARY"

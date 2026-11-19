@@ -112,3 +112,32 @@ def test_file_at_size_limit_remains_eligible(tmp_path):
     ]
 
     assert select_best_plan(ai, "{}", [], tmp_path) is not None
+
+
+def test_ranked_candidates_enable_fallback_after_empty_diff(tmp_path):
+    ai = Mock()
+    ai.plan.side_effect = [
+        make_plan("Test deterministic schema", .90),
+        make_plan("Test count boundaries", .80),
+        make_plan("Test PII blocking", .70),
+    ]
+    plans = select_best_plan(ai, "{}", [], tmp_path, return_candidates=True)
+    assert len(plans) == 3
+    assert [p.title for p in plans] == [
+        "Test deterministic schema", "Test count boundaries", "Test PII blocking"
+    ]
+
+
+def test_ranked_candidates_preserve_rejection_of_oversized_file(tmp_path):
+    large = tmp_path / "tests" / "test_openai_provider.py"
+    large.parent.mkdir()
+    large.write_text("x" * 18001)
+    ai = Mock()
+    ai.plan.side_effect = [
+        make_plan("Test PII redaction", .95, "tests/test_openai_provider.py"),
+        make_plan("Test deterministic seed", .85, "tests/test_mock_provider.py"),
+        make_plan("Test schema boundaries", .75, "tests/test_openai_provider.py"),
+    ]
+    plans = select_best_plan(ai, "{}", [], tmp_path, return_candidates=True)
+    assert len(plans) == 1
+    assert plans[0].target_files == ["tests/test_mock_provider.py"]
