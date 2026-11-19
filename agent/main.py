@@ -751,7 +751,9 @@ def run_one(repo_cfg, gh, ai, args):
             log.info("IMPLEMENTATION ATTEMPT %d/%d %s: %s",
                      attempt, min(len(plans), MAX_IMPLEMENTATION_ATTEMPTS), name, plan.title)
             if attempt > 1:
-                git(root, "reset", "--hard", "HEAD")
+                # Temporary checkout only: remove prior generated test files as well as edits.
+                restore_initial_files(root, previous_contents)
+            previous_contents = {}
             # Log the AI planner's complete decision.
             log.info(
                 "PLAN %s | action=%s | title=%s | "
@@ -801,6 +803,7 @@ def run_one(repo_cfg, gh, ai, args):
                 log.warning("SKIP %s: test-only proposal includes production edit targets", name)
                 return "skip: test plan targets production files"
             contents = read_files(root, plan.target_files)
+            previous_contents = contents
             contracts = read_only_contract_context(root, names, plan)
             log.info("READ-ONLY CONTRACTS %s: %s", name, list(contracts))
             contract_text = json.dumps(contracts, ensure_ascii=False)
